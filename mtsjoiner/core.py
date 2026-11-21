@@ -5,11 +5,17 @@
 предыдущий. Звук в TS-мультиплексе лежит ~0.77 с «впереди» видео, поэтому при раздельном
 импорте в монтажку на стыках появляются чёрный экран со звуком и видео без звука. Побайтовая
 склейка кусков (протокол concat) полностью убирает эти разрывы без перекодирования.
+
+Состав дублей определяется двумя способами:
+* по служебным файлам камеры (PLAYLIST/CLIPINF) — точно, с датой/временем записи, узнаёт
+  переименованные файлы по размеру и показывает, каких кусков не хватает;
+* без них — по непрерывности временных меток внутри самих MTS.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -18,14 +24,16 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
+
+from . import avchd
 
 VIDEO_EXTS = {".mts", ".m2ts"}
-# Новая запись в AVCHD начинается с метки ~1.02 с; продолжение — с конца предыдущего куска.
-CONTINUITY_TOLERANCE = 0.2
+CONTINUITY_TOLERANCE = 0.2   # с
+NEW_RECORDING_START = 2.0    # новая запись AVCHD начинается с метки ~1.02 с
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
@@ -34,14 +42,10 @@ KNOWN_FFMPEG_DIRS = [
     r"C:\Program Files\ffmpeg\bin",
     r"D:\Bitwig Studio\bin",
     r"C:\Program Files\Bitwig Studio\bin",
-    r"C:\Program Files\Shutter Encoder\Library",
 ]
 
-CONTAINERS = ("mp4", "mov", "mkv")
-AUDIO_MODES = ("copy", "pcm")  # copy = оригинальный AC3, pcm = PCM 24 бит
 
-
-# --------------------------------------------------------------------------- ffmpeg
+# =========================================================================== ffmpeg
 
 
 def app_dir() -> Path:
@@ -57,46 +61,103 @@ def _pair_in(folder: Path) -> tuple[str, str] | None:
     return None
 
 
-def find_ffmpeg(preferred: str | None = None) -> tuple[str, str] | None:
-    """Вернуть (ffmpeg, ffprobe) или None."""
-    candidates: list[Path] = []
-    if preferred:
-        p = Path(preferred)
-        candidates.append(p.parent if p.is_file() else p)
+def ffmpeg_candidates() -> list[Path]:
     base = app_dir()
-    candidates += [base, base / "ffmpeg", base / "ffmpeg" / "bin"]
-    for c in candidates:
-        pair = _pair_in(c)
+    dirs = [base, base / "ffmpeg", base / "ffmpeg" / "bin"]
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    pk = local / "Microsoft" / "WinGet" / "Packages"
+    if pk.is_dir():
+        for d in sorted(pk.glob("*FFmpeg*"), reverse=True):
+            dirs += sorted((p.parent for p in d.glob("*/bin/ffmpeg.exe")), reverse=True)
+    which = shutil.which("ffmpeg")
+    if which and "devkitpro" not in which.lower() and "msys" not in which.lower():
+        dirs.append(Path(which).resolve().parent)
+    dirs.append(local / "Microsoft" / "WinGet" / "Links")
+    dirs += [Path(d) for d in KNOWN_FFMPEG_DIRS]
+    return dirs
+
+
+def find_ffmpeg(manual: str | None = None) -> tuple[str, str] | None:
+    """Вернуть (ffmpeg, ffprobe). manual — путь, выбранный пользователем."""
+    if manual:
+        p = Path(manual)
+        pair = _pair_in(p.parent if p.suffix else p)
         if pair:
             return pair
-    ff, fp = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    # ffmpeg из devkitPro/msys на PATH не годится для путей Windows — пропускаем его
-    if ff and fp and "devkitpro" not in ff.lower() and "msys" not in ff.lower():
-        return ff, fp
-    for d in KNOWN_FFMPEG_DIRS:
-        pair = _pair_in(Path(d))
+    for d in ffmpeg_candidates():
+        pair = _pair_in(d)
         if pair:
             return pair
     return None
 
 
-def ffmpeg_has_encoder(ffmpeg: str, name: str) -> bool:
+def _run(cmd: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          creationflags=CREATE_NO_WINDOW, timeout=timeout)
+
+
+def ffmpeg_version(ffmpeg: str) -> str:
     try:
-        out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True,
-                             text=True, encoding="utf-8", errors="replace",
-                             creationflags=CREATE_NO_WINDOW, timeout=30).stdout
+        first = _run([ffmpeg, "-hide_banner", "-version"], 20).stdout.splitlines()[0]
+        return first.replace("ffmpeg version ", "").split(" Copyright")[0]
     except Exception:
-        return False
-    return re.search(rf"^\s*\S+\s+{re.escape(name)}\s", out, re.M) is not None
+        return "?"
 
 
-# --------------------------------------------------------------------------- анализ
+def ffmpeg_encoders(ffmpeg: str) -> set[str]:
+    try:
+        out = _run([ffmpeg, "-hide_banner", "-encoders"], 30).stdout
+    except Exception:
+        return set()
+    return set(re.findall(r"^\s*[VAS][\w.]{5}\s+(\S+)", out, re.M))
+
+
+# Кодировщики в порядке предпочтения (качество/скорость) для каждого кодека
+# (видеокарта по качеству на равном битрейте почти не уступает x264/x265, но в 3–8 раз быстрее)
+ENCODER_PREFS = {
+    "h264": ["h264_nvenc", "h264_amf", "h264_qsv", "libx264", "h264_mf"],
+    "hevc": ["hevc_nvenc", "hevc_amf", "hevc_qsv", "libx265", "hevc_mf"],
+}
+ENCODER_NAMES = {
+    "libx264": "x264 (процессор, лучшее качество)",
+    "libx265": "x265 (процессор, медленно)",
+    "h264_nvenc": "NVIDIA NVENC", "hevc_nvenc": "NVIDIA NVENC",
+    "h264_amf": "AMD AMF", "hevc_amf": "AMD AMF",
+    "h264_qsv": "Intel QuickSync", "hevc_qsv": "Intel QuickSync",
+    "h264_mf": "Windows Media Foundation", "hevc_mf": "Windows Media Foundation",
+}
+
+
+def working_encoders(ffmpeg: str) -> dict[str, list[str]]:
+    """Какие кодировщики есть в сборке И реально запускаются на этом компьютере."""
+    have = ffmpeg_encoders(ffmpeg)
+    result: dict[str, list[str]] = {}
+    for codec, prefs in ENCODER_PREFS.items():
+        ok = []
+        for enc in prefs:
+            if enc not in have:
+                continue
+            if enc.startswith("lib"):
+                ok.append(enc)
+                continue
+            try:  # аппаратные — пробное кодирование (драйвер может быть старым)
+                r = _run([ffmpeg, "-hide_banner", "-v", "error", "-f", "lavfi", "-i",
+                          "color=s=1280x720:r=25:d=0.2", "-c:v", enc, "-f", "null", "-"], 30)
+                if r.returncode == 0:
+                    ok.append(enc)
+            except Exception:
+                pass
+        result[codec] = ok
+    return result
+
+
+# =========================================================================== анализ
 
 
 @dataclass
 class Clip:
     path: Path
-    number: int
+    number: int | None
     size: int
     mtime: float
     v_start: float | None = None
@@ -106,7 +167,11 @@ class Clip:
     fps: str | None = None
     a_codec: str | None = None
     a_channels: int | None = None
+    a_start: float | None = None
+    a_dur: float | None = None
+    interlaced: bool = False
     error: str | None = None
+    meta_name: str | None = None      # имя клипа по метаданным камеры
 
     @property
     def v_end(self) -> float | None:
@@ -121,9 +186,20 @@ class Clip:
 
 @dataclass
 class Take:
-    index: int
+    """Строка списка = один выходной файл: целая запись или её часть (если не хватает кусков)."""
+    index: int                     # уникальный номер строки
+    rec_no: int                    # номер записи (дубля)
     clips: list[Clip] = field(default_factory=list)
+    part: int = 1
+    parts_total: int = 1
+    note: str = ""                 # что не так (пропущенные куски)
+    start_dt: datetime | None = None
+    from_meta: bool = False
     selected: bool = True
+
+    @property
+    def label(self) -> str:
+        return f"{self.rec_no}.{self.part}" if self.parts_total > 1 else str(self.rec_no)
 
     @property
     def duration(self) -> float:
@@ -152,7 +228,8 @@ class Take:
 
     @property
     def approx_start(self) -> datetime:
-        """Время начала записи ≈ время изменения первого файла минус его длительность."""
+        if self.start_dt:
+            return self.start_dt
         c = self.clips[0]
         return datetime.fromtimestamp(c.mtime) - timedelta(seconds=c.v_dur or 0)
 
@@ -160,29 +237,43 @@ class Take:
     def has_error(self) -> bool:
         return any(c.error for c in self.clips)
 
+    def trim(self) -> tuple[float, float | None]:
+        """(обрезка в начале, длительность или None) — чтобы убрать края без пары «видео+звук».
 
-def list_clips(folder: Path) -> tuple[list[Clip], list[Path]]:
-    """Вернуть (клипы с номерными именами, пропущенные файлы)."""
-    clips, skipped = [], []
-    for p in sorted(folder.iterdir()):
-        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTS:
-            continue
-        if not p.stem.isdigit():
-            skipped.append(p)  # например «00161 — копия.MTS»
-            continue
-        st = p.stat()
-        clips.append(Clip(path=p, number=int(p.stem), size=st.st_size, mtime=st.st_mtime))
-    clips.sort(key=lambda c: c.number)
-    return clips, skipped
+        Звук в MTS идёт на ~0.77 с раньше видео. У целой записи это незаметно, но если соседний
+        кусок потерян, в начале части остаётся звук без картинки, а в конце — картинка без звука.
+        """
+        first, last = self.clips[0], self.clips[-1]
+        if None in (first.v_start, first.a_start, last.v_end, last.a_start, last.a_dur):
+            return 0.0, None
+        file_start = min(first.v_start, first.a_start)
+        start = max(first.v_start, first.a_start)
+        end = min(last.v_end, last.a_start + last.a_dur)
+        head = start - file_start
+        tail_cut = max(last.v_end, last.a_start + last.a_dur) - end
+        if head < 0.05 and tail_cut < 0.05:
+            return 0.0, None
+        return head, end - start
+
+
+@dataclass
+class ScanResult:
+    takes: list[Take]
+    skipped: list[str]             # строки для журнала
+    meta_used: Path | None = None
+    meta_warnings: list[str] = field(default_factory=list)
+
+
+def list_files(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
 
 
 def probe_clip(ffprobe: str, clip: Clip) -> Clip:
     cmd = [ffprobe, "-v", "error", "-show_entries",
-           "stream=codec_type,codec_name,start_time,duration,width,height,r_frame_rate,channels",
+           "stream=codec_type,codec_name,start_time,duration,width,height,r_frame_rate,channels,field_order",
            "-of", "json", str(clip.path)]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", creationflags=CREATE_NO_WINDOW, timeout=120)
+        res = _run(cmd, 120)
         data = json.loads(res.stdout or "{}")
     except Exception as e:  # noqa: BLE001
         clip.error = f"ffprobe: {e}"
@@ -191,7 +282,7 @@ def probe_clip(ffprobe: str, clip: Clip) -> Clip:
     v = next((s for s in streams if s.get("codec_type") == "video"), None)
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if not v:
-        clip.error = "нет видеодорожки" + (f" ({res.stderr.strip()[:200]})" if res.stderr else "")
+        clip.error = "нет видеодорожки"
         return clip
     try:
         clip.v_start = float(v.get("start_time"))
@@ -199,53 +290,385 @@ def probe_clip(ffprobe: str, clip: Clip) -> Clip:
     except (TypeError, ValueError):
         clip.error = "не удалось прочитать длительность"
     clip.width, clip.height, clip.fps = v.get("width"), v.get("height"), v.get("r_frame_rate")
+    clip.interlaced = v.get("field_order") in ("tt", "bb", "tb", "bt")
     if a:
         clip.a_codec, clip.a_channels = a.get("codec_name"), a.get("channels")
+        try:
+            clip.a_start, clip.a_dur = float(a.get("start_time")), float(a.get("duration"))
+        except (TypeError, ValueError):
+            pass
     return clip
 
 
-def group_takes(clips: list[Clip]) -> list[Take]:
-    takes: list[Take] = []
+def _fmt_missing(names: list[str], seconds: float) -> str:
+    if not names:
+        return f"не хватает ≈{fmt_dur(seconds)}"
+    shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return f"нет файла {shown} (≈{fmt_dur(seconds)})"
+
+
+def _finish_parts(rec_no: int, parts: list[tuple[list[Clip], str, datetime | None]],
+                  takes: list[Take], from_meta: bool):
+    for i, (clips, note, dt) in enumerate(parts, 1):
+        takes.append(Take(index=len(takes) + 1, rec_no=rec_no, clips=clips, part=i,
+                          parts_total=len(parts), note=note, start_dt=dt, from_meta=from_meta))
+
+
+def group_by_timestamps(clips: list[Clip], takes: list[Take], rec_no: int) -> int:
+    """Группировка без метаданных. Возвращает последний использованный номер записи."""
+    clips = sorted(clips, key=lambda c: (c.number is None, c.number or 0, c.path.name))
+    parts: list[tuple[list[Clip], str, datetime | None]] = []
     prev: Clip | None = None
+
+    def flush():
+        nonlocal parts, rec_no
+        if parts:
+            rec_no += 1
+            _finish_parts(rec_no, parts, takes, False)
+        parts = []
+
     for c in clips:
-        cont = (
-            prev is not None and takes
-            and not c.error and not prev.error
-            and c.number == prev.number + 1
-            and prev.v_end is not None and c.v_start is not None
-            and abs(c.v_start - prev.v_end) <= CONTINUITY_TOLERANCE
-            and c.signature == prev.signature
-        )
-        if cont:
-            takes[-1].clips.append(c)
+        ok = not c.error and c.v_start is not None
+        cont = (prev is not None and ok and not prev.error and prev.v_end is not None
+                and c.signature == prev.signature
+                and (c.number is None or prev.number is None or c.number > prev.number))
+        if cont and abs(c.v_start - prev.v_end) <= CONTINUITY_TOLERANCE and c.number == (prev.number or -9) + 1:
+            parts[-1][0].append(c)
+        elif (cont and c.v_start > NEW_RECORDING_START and c.v_start > prev.v_end + CONTINUITY_TOLERANCE
+              # по часам: начало этого куска ≈ конец предыдущего + длительность пропуска
+              and abs((c.mtime - (c.v_dur or 0)) - prev.mtime - (c.v_start - prev.v_end)) < 30):
+            # продолжение той же записи, но между кусками чего-то не хватает
+            gap = c.v_start - prev.v_end
+            missing = []
+            if c.number is not None and prev.number is not None:
+                missing = [f"{n:05d}" for n in range(prev.number + 1, c.number)]
+            parts.append(([c], _fmt_missing(missing, gap), None))
         else:
-            takes.append(Take(index=len(takes) + 1, clips=[c]))
+            flush()
+            note = ""
+            if ok and c.v_start > NEW_RECORDING_START:
+                note = f"нет начала записи (≈{fmt_dur(c.v_start - 1.02)})"
+            parts = [([c], note, None)]
         prev = c
-    return takes
+    flush()
+    return rec_no
 
 
-def scan_folder(folder: Path, ffprobe: str,
-                progress: Callable[[int, int], None] | None = None) -> tuple[list[Take], list[Path]]:
-    clips, skipped = list_clips(folder)
+def group_by_metadata(clips: list[Clip], bdmv: Path, takes: list[Take],
+                      skipped: list[str]) -> tuple[list[Clip], list[str]]:
+    """Группировка по PLAYLIST/CLIPINF. Возвращает (клипы, не найденные в метаданных, предупреждения)."""
+    recs, warnings = avchd.read_recordings(bdmv)
+    names = [it.clip for r in recs for it in r.items]
+    cpis: dict[str, avchd.ClipInfo] = {}
+    for n in names:
+        ci = avchd.read_cpi(bdmv, n)
+        if ci:
+            cpis[n] = ci
+    by_size: dict[int, list[str]] = {}
+    for n, ci in cpis.items():
+        by_size.setdefault(ci.size, []).append(n)
+
+    # 1) точное совпадение имени и размера, 2) по размеру (переименованные файлы)
+    assigned: dict[str, Clip] = {}
+    rest: list[Clip] = []
+    for c in clips:
+        ci = cpis.get(c.path.stem)
+        if ci and ci.size == c.size and c.path.stem not in assigned:
+            c.meta_name = c.path.stem
+            assigned[c.meta_name] = c
+        else:
+            rest.append(c)
+    unmatched: list[Clip] = []
+    for c in rest:
+        cands = [n for n in by_size.get(c.size, []) if n not in assigned]
+        if c.v_start is not None:
+            cands = [n for n in cands if abs(cpis[n].start - c.v_start) < 0.1] or cands
+        if cands:
+            c.meta_name = cands[0]
+            assigned[c.meta_name] = c
+        elif any(n in assigned for n in by_size.get(c.size, [])):
+            skipped.append(f"Пропущен дубликат: {c.path.name} (тот же клип, что "
+                           f"{assigned[by_size[c.size][0]].path.name})")
+        elif c.path.stem in cpis and c.path.stem not in assigned:
+            # имя есть в метаданных, но размер другой — файл обрезан/повреждён при копировании?
+            c.meta_name = c.path.stem
+            assigned[c.meta_name] = c
+            skipped.append(f"⚠ {c.path.name}: размер {c.size} Б, а по метаданным "
+                           f"{cpis[c.path.stem].size} Б — файл мог быть скопирован не полностью.")
+        else:
+            unmatched.append(c)
+
+    rec_no = 0
+    for r in recs:
+        if not any(it.clip in assigned for it in r.items):
+            continue
+        rec_no += 1
+        parts: list[tuple[list[Clip], str, datetime | None]] = []
+        missing: list[str] = []
+        missing_sec = 0.0
+        t0 = r.items[0].t_in
+        for it in r.items:
+            c = assigned.get(it.clip)
+            if c is None:
+                missing.append(it.clip)
+                missing_sec += it.duration
+                continue
+            if c.v_start is None and not c.error:
+                c.v_start, c.v_dur = it.t_in, it.duration
+            if parts and not missing:
+                parts[-1][0].append(c)
+            else:
+                note = ""
+                if missing:
+                    note = _fmt_missing(missing, missing_sec)
+                    if not parts:
+                        note = "начало записи: " + note
+                dt = r.start_dt + timedelta(seconds=it.t_in - t0) if r.start_dt else None
+                parts.append(([c], note, dt))
+                missing, missing_sec = [], 0.0
+        if missing and parts:  # нет хвоста записи
+            last = parts[-1]
+            tail = _fmt_missing(missing, missing_sec)
+            parts[-1] = (last[0], (last[1] + "; " if last[1] else "") + "конец записи: " + tail, last[2])
+        _finish_parts(rec_no, parts, takes, True)
+    return unmatched, warnings
+
+
+def scan_folder(folder: Path, ffprobe: str, meta: Path | None = None,
+                progress: Callable[[int, int], None] | None = None) -> ScanResult:
+    paths = list_files(folder)
+    skipped: list[str] = []
+    clips: list[Clip] = []
+    for p in paths:
+        st = p.stat()
+        num = int(p.stem) if p.stem.isdigit() else None
+        clips.append(Clip(path=p, number=num, size=st.st_size, mtime=st.st_mtime))
+
     done = 0
     with ThreadPoolExecutor(max_workers=4) as ex:
         for _ in ex.map(lambda c: probe_clip(ffprobe, c), clips):
             done += 1
             if progress:
                 progress(done, len(clips))
-    return group_takes(clips), skipped
+
+    takes: list[Take] = []
+    bdmv = avchd.find_bdmv(meta) if meta else None
+    warnings: list[str] = []
+    if meta and not bdmv:
+        warnings.append(f"В «{meta}» не найдены папки PLAYLIST и CLIPINF — дубли определены по меткам времени.")
+    if bdmv:
+        rest, warnings = group_by_metadata(clips, bdmv, takes, skipped)
+        if rest:
+            warnings.append(f"Файлов нет в метаданных камеры: {len(rest)} — сгруппированы по меткам времени.")
+            numbered = [c for c in rest if c.number is not None]
+            for c in rest:
+                if c.number is None:
+                    skipped.append(f"Пропущен (не номерное имя и нет в метаданных): {c.path.name}")
+            last_rec = max((t.rec_no for t in takes), default=0)
+            group_by_timestamps(numbered, takes, last_rec)
+    else:
+        numbered = []
+        for c in clips:
+            if c.number is None:
+                dup = next((o for o in clips if o is not c and o.number is not None and o.size == c.size), None)
+                skipped.append(f"Пропущен дубликат: {c.path.name} (= {dup.path.name})" if dup
+                               else f"Пропущен (не номерное имя): {c.path.name}")
+            else:
+                numbered.append(c)
+        group_by_timestamps(numbered, takes, 0)
+    for i, t in enumerate(takes, 1):
+        t.index = i
+    return ScanResult(takes, skipped, bdmv, warnings)
 
 
-# --------------------------------------------------------------------------- задания
+# =========================================================================== настройки вывода
 
 
 @dataclass
 class Options:
-    container: str = "mov"     # mp4 / mov / mkv
-    audio: str = "pcm"         # copy / pcm
-    single_file: bool = False  # все выбранные дубли в один файл
+    container: str = "mov"          # mp4 / mov / mkv
+    video: str = "copy"             # copy / h264 / hevc
+    encoder: str = ""               # конкретный кодировщик ("" = лучший доступный)
+    rate_mode: str = "quality"      # quality / size
+    quality: int = 21               # CRF-подобная шкала: меньше — лучше
+    size_limit_mb: int = 1950       # для rate_mode == size
+    height: int = 0                 # 0 = как в исходнике, иначе 1080/720 (-1 = авто по битрейту)
+    audio: str = "pcm"              # copy / pcm / aac
+    audio_kbps: int = 512
+    stereo: bool = False
+    faststart: bool = False
+    single_file: bool = False
     proxies: bool = False
     out_dir: Path = Path(".")
+
+
+@dataclass
+class Preset:
+    key: str
+    title: str
+    hint: str
+    opts: dict
+
+
+PRESETS = [
+    Preset("premiere", "Монтаж в Premiere — без потерь",
+           "Видео 1:1 без перекодирования, звук PCM 5.1 24 бит (Premiere читает всегда). "
+           "Идеально и для заливки на YouTube, если не жалко объёма.",
+           dict(container="mov", video="copy", audio="pcm", stereo=False, faststart=False)),
+    Preset("archive", "Архив — бит-в-бит как с камеры",
+           "Видео и звук AC3 копируются без изменений, просто склеены. Минимальный объём без потерь.",
+           dict(container="mp4", video="copy", audio="copy", stereo=False, faststart=False)),
+    Preset("youtube", "YouTube — без потерь",
+           "Видео 1:1 (≈25 Мбит/с — выше рекомендации YouTube для 1080p50), звук AAC 512 кбит/с 5.1 — "
+           "максимум из рекомендаций YouTube. YouTube всё равно перекодирует, так что лучше не сделать.",
+           dict(container="mp4", video="copy", audio="aac", audio_kbps=512, stereo=False, faststart=True)),
+    Preset("telegram", "Telegram — под лимит файла",
+           "H.264 + AAC стерео, «быстрый старт» для просмотра в чате. Битрейт подбирается так, чтобы "
+           "файл влез в лимит (2 ГБ, с Premium — 4 ГБ); длинная запись режется на части.",
+           dict(container="mp4", video="h264", rate_mode="size", size_limit_mb=1950, height=-1,
+                audio="aac", audio_kbps=192, stereo=True, faststart=True)),
+    Preset("economy", "Экономичный — в 3–5 раз меньше",
+           "HEVC (H.265) 1080p50 с постоянным качеством, звук AAC 5.1 384 кбит/с. Визуально почти "
+           "без потерь — для хранения и просмотра, когда оригинал слишком тяжёлый.",
+           dict(container="mp4", video="hevc", rate_mode="quality", quality=23, height=0,
+                audio="aac", audio_kbps=384, stereo=False, faststart=True)),
+]
+CUSTOM_PRESET = "custom"
+
+
+def apply_preset(opts: Options, key: str) -> Options:
+    p = next((p for p in PRESETS if p.key == key), None)
+    return replace(opts, **p.opts) if p else opts
+
+
+def effective_container(opts: Options) -> str:
+    # PCM в MP4 Premiere/плееры не читают — пишем MOV
+    if opts.audio == "pcm" and opts.container == "mp4":
+        return "mov"
+    return opts.container
+
+
+def pick_encoder(opts: Options, available: dict[str, list[str]]) -> str | None:
+    lst = available.get(opts.video, [])
+    if opts.encoder and opts.encoder in lst:
+        return opts.encoder
+    return lst[0] if lst else None
+
+
+AUDIO_COPY_BPS = 448_000 / 8
+PCM_BPS = 48_000 * 3 * 6
+SOURCE_VIDEO_KBPS = 25_000
+
+
+def audio_bps(opts: Options) -> float:
+    ch = 2 if opts.stereo else 6
+    if opts.audio == "copy":
+        return AUDIO_COPY_BPS
+    if opts.audio == "pcm":
+        return 48_000 * 3 * ch
+    return opts.audio_kbps * 1000 / 8
+
+
+def quality_kbps_guess(opts: Options, height: int) -> int:
+    """Грубая оценка битрейта режима «качество» для 50p (для расчёта места на диске)."""
+    # замер на освещённой сцене 1080p50: x264 crf20 ≈ 13 Мбит/с, x265 crf22 ≈ 5 Мбит/с
+    base = 13000 if opts.video == "h264" else 5000
+    ref = 20 if opts.video == "h264" else 22
+    k = 2 ** ((ref - opts.quality) / 6)
+    scale = 1.0 if height in (0, 1080) else 0.5
+    return int(base * k * scale)
+
+
+@dataclass
+class EncodePlan:
+    height: int                  # 0 = как есть
+    video_kbps: int | None       # для size-режима
+    parts: int = 1
+    deinterlace: bool = False    # 1080i (многие AVCHD-камеры) → 50p/60p
+
+
+def plan_size_mode(duration: float, opts: Options) -> EncodePlan:
+    limit_bytes = opts.size_limit_mb * 1024 * 1024 * 0.96
+    a_kbps = audio_bps(opts) * 8 / 1000
+    overhead = 40
+    max_v = {1080: 10_000, 720: 5_000}
+
+    def kbps_for(parts: int) -> float:
+        return limit_bytes * 8 / 1000 / (duration / parts) - a_kbps - overhead
+
+    parts = 1
+    v = kbps_for(1)
+    want_h = opts.height
+    if want_h == -1:  # авто: 1080p если ≥ 4.5 Мбит/с, иначе 720p, а если < 1.8 — делим на части
+        if v < 1800:
+            parts = math.ceil(duration * (1800 + a_kbps + overhead) * 1000 / 8 / limit_bytes)
+            v = kbps_for(parts)
+        want_h = 1080 if v >= 4500 else 720
+    else:
+        if v < 1000:
+            parts = math.ceil(duration * (1000 + a_kbps + overhead) * 1000 / 8 / limit_bytes)
+            v = kbps_for(parts)
+    cap = max_v.get(want_h or 1080, 10_000)
+    return EncodePlan(height=want_h, video_kbps=int(min(v, cap)), parts=parts)
+
+
+def video_args(opts: Options, enc: str, plan: EncodePlan) -> list[str]:
+    a: list[str] = []
+    vf = []
+    if plan.deinterlace:
+        vf.append("bwdif=mode=send_field")  # каждое поле → кадр: 1080i50 → 1080p50
+    if plan.height and plan.height > 0:
+        vf.append(f"scale=-2:{plan.height}:flags=lanczos")
+    vf.append("format=yuv420p")
+    a += ["-vf", ",".join(vf), "-c:v", enc]
+    q = opts.quality
+    b = plan.video_kbps
+    size_mode = opts.rate_mode == "size" and b
+    if enc == "libx264":
+        a += ["-preset", "medium", "-profile:v", "high"]
+        a += ["-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k", "-bufsize", f"{b * 2}k"] if size_mode \
+            else ["-crf", str(q)]
+    elif enc == "libx265":
+        a += ["-preset", "fast", "-tag:v", "hvc1", "-x265-params", "log-level=error"]
+        a += ["-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k", "-bufsize", f"{b * 2}k"] if size_mode \
+            else ["-crf", str(q)]
+    elif enc.endswith("_nvenc"):
+        a += ["-preset", "p6", "-tune", "hq", "-spatial-aq", "1", "-rc-lookahead", "32"]
+        a += ["-rc", "vbr", "-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k", "-bufsize", f"{b * 2}k",
+              "-multipass", "fullres"] if size_mode else ["-rc", "vbr", "-cq", str(q), "-b:v", "0"]
+    elif enc.endswith("_amf"):
+        a += ["-quality", "quality"]
+        if size_mode:
+            a += ["-rc", "vbr_peak", "-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k"]
+        else:
+            # у AMF шкала обратная (больше — лучше); 46 - q даёт то же качество, что CRF q у x265
+            guess = quality_kbps_guess(opts, plan.height)
+            a += ["-rc", "qvbr", "-qvbr_quality_level", str(max(1, min(51, 46 - q))),
+                  "-b:v", f"{guess}k", "-maxrate", f"{guess * 2}k"]
+    elif enc.endswith("_qsv"):
+        a += ["-preset", "slower"]
+        a += ["-b:v", f"{b}k", "-maxrate", f"{int(b * 1.5)}k"] if size_mode \
+            else ["-global_quality", str(q)]
+    else:  # *_mf — только битрейт
+        kb = b if size_mode else quality_kbps_guess(opts, plan.height)
+        a += ["-rate_control", "u_vbr", "-b:v", f"{kb}k", "-hw_encoding", "1"]
+    if enc.startswith(("h264", "libx264")):
+        a += ["-g", "100"]  # ключевой кадр каждые 2 с — удобная перемотка
+    if opts.video == "hevc" and "-tag:v" not in a:
+        a += ["-tag:v", "hvc1"]
+    return a
+
+
+def audio_args(opts: Options) -> list[str]:
+    ch = ["-ac", "2"] if opts.stereo and opts.audio != "copy" else []
+    if opts.audio == "copy":
+        return ["-c:a", "copy"]
+    if opts.audio == "pcm":
+        return ["-c:a", "pcm_s24le", *ch]
+    kbps = opts.audio_kbps
+    if not opts.stereo:
+        kbps = max(kbps, 256)
+    return ["-c:a", "aac", "-b:a", f"{kbps}k", *ch]
 
 
 @dataclass
@@ -256,17 +679,6 @@ class Job:
     output: Path
     duration: float            # секунд, для прогресса
     temp_files: list[Path] = field(default_factory=list)
-
-
-def effective_container(opts: Options) -> str:
-    # PCM в MP4 Premiere не читает — в этом случае пишем MOV
-    if opts.audio == "pcm" and opts.container == "mp4":
-        return "mov"
-    return opts.container
-
-
-def audio_args(opts: Options) -> list[str]:
-    return ["-c:a", "pcm_s24le"] if opts.audio == "pcm" else ["-c:a", "copy"]
 
 
 def concat_url(take: Take) -> str:
@@ -286,61 +698,107 @@ def unique_path(p: Path, reserved: set[Path]) -> Path:
     return cand
 
 
-def estimate_output_size(takes: Iterable[Take], opts: Options) -> int:
-    total = 0
-    for t in takes:
-        total += t.size
-        if opts.audio == "pcm":
-            # PCM 24 бит 5.1 48 кГц ≈ 864 000 Б/с вместо AC3 448 кбит/с (56 000 Б/с)
-            total += int(t.duration * (864_000 - 56_000))
+def estimate_output_size(takes: list[Take], opts: Options) -> int:
+    dur = sum(t.duration for t in takes)
+    if opts.video == "copy":
+        total = sum(t.size for t in takes) - dur * AUDIO_COPY_BPS + dur * audio_bps(opts)
+    elif opts.rate_mode == "size":
+        total = 0
+        for t in takes:
+            pl = plan_size_mode(t.duration, opts)
+            total += t.duration * ((pl.video_kbps or 0) * 1000 / 8 + audio_bps(opts))
+    else:
+        total = dur * (quality_kbps_guess(opts, opts.height) * 1000 / 8 + audio_bps(opts))
     if opts.proxies:
-        total += int(sum(t.duration for t in takes) * 3_000_000)  # ProRes Proxy 540p ≈ 24 Мбит/с
-    return total
+        total += dur * 2_300_000  # ProRes Proxy 540p50 ≈ 18 Мбит/с
+    return int(total)
 
 
-def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str) -> list[Job]:
-    total_takes = len(takes)
+def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
+               available: dict[str, list[str]] | None = None) -> list[Job]:
+    total_rows = len(takes)
     takes = [t for t in takes if t.selected]
     ext = effective_container(opts)
-    out_dir = opts.out_dir
     reserved: set[Path] = set()
     base = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
             "-progress", "pipe:1", "-nostats"]
-    stream_args = ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *audio_args(opts),
-                   "-map_metadata", "-1"]
-    jobs: list[Job] = []
+    enc = None
+    if opts.video != "copy":
+        enc = pick_encoder(opts, available or {})
+        if not enc:
+            raise RuntimeError(f"В ffmpeg нет рабочего кодировщика {opts.video.upper()}.")
 
+    # источники: (название, аргументы входа, начальный сдвиг, длительность, имя файла, обрезка)
+    sources: list[tuple[str, list[str], float, float, str, bool]] = []
     if opts.single_file and len(takes) > 1:
-        if len(takes) == total_takes:
-            name = f"{prefix}_концерт"
-        else:
-            name = f"{prefix}_дубли_{takes[0].index:02d}-{takes[-1].index:02d}"
-        out = unique_path(out_dir / f"{name}.{ext}", reserved)
+        name = (f"{prefix}_концерт" if len(takes) == total_rows
+                else f"{prefix}_дубли_{takes[0].label}-{takes[-1].label}")
         lines = ["ffconcat version 1.0"]
+        total = 0.0
         for t in takes:
-            url = concat_url(t).replace("\\", "/")
-            lines.append(f"file {_ffconcat_quote(url)}")
+            lines.append(f"file {_ffconcat_quote(concat_url(t).replace(chr(92), '/'))}")
+            head, dur = t.trim()
+            if dur is not None:
+                # inpoint/outpoint concat-демуксера — абсолютные метки времени потока
+                c0 = t.clips[0]
+                fs = min(c0.v_start, c0.a_start)
+                if head > 0:
+                    lines.append(f"inpoint {fs + head:.6f}")
+                lines.append(f"outpoint {fs + head + dur:.6f}")
+            total += dur if dur is not None else t.duration
         fd, list_path = tempfile.mkstemp(prefix="mtsjoiner_", suffix=".ffconcat")
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines) + "\n")
-        cmd = [*base, "-f", "concat", "-safe", "0", "-protocol_whitelist", "file,concat",
-               "-i", list_path, *stream_args, str(out)]
-        jobs.append(Job("join", f"Все дубли → {out.name}", cmd, out,
-                        sum(t.duration for t in takes), [Path(list_path)]))
+        inp = ["-f", "concat", "-safe", "0", "-protocol_whitelist", "file,concat", "-i", list_path]
+        sources.append(("Все дубли", inp, 0.0, total, name, False))
+        temp = [Path(list_path)]
     else:
+        temp = []
         for t in takes:
             span = t.first_name + (f"-{t.last_name}" if len(t.clips) > 1 else "")
-            out = unique_path(out_dir / f"{prefix}_дубль{t.index:02d}_{span}.{ext}", reserved)
-            cmd = [*base, "-i", concat_url(t), *stream_args, str(out)]
-            jobs.append(Job("join", f"Дубль {t.index} → {out.name}", cmd, out, t.duration))
+            part = f"_ч{t.part}" if t.parts_total > 1 else ""
+            head, dur = t.trim()
+            sources.append((f"Дубль {t.label}", ["-i", concat_url(t)], head,
+                            dur if dur is not None else t.duration,
+                            f"{prefix}_дубль{t.rec_no:02d}{part}_{span}", dur is not None))
+
+    interlaced = any(c.interlaced for t in takes for c in t.clips)
+    jobs: list[Job] = []
+    for title, inp, head, dur, stem, trimmed in sources:
+        plan = EncodePlan(height=0 if opts.height == -1 else opts.height, video_kbps=None)
+        if opts.video != "copy" and opts.rate_mode == "size":
+            plan = plan_size_mode(dur, opts)
+        plan.deinterlace = interlaced
+        if opts.video == "copy":
+            vargs = ["-c:v", "copy"]
+        else:
+            vargs = video_args(opts, enc, plan)
+        tail = ["-map", "0:v:0", "-map", "0:a:0?", *vargs, *audio_args(opts),
+                "-map_metadata", "-1"]
+        if opts.faststart and ext in ("mp4", "mov"):
+            tail += ["-movflags", "+faststart"]
+        seg = dur / plan.parts
+        for k in range(plan.parts):
+            suffix = f"_часть{k + 1}из{plan.parts}" if plan.parts > 1 else ""
+            out = unique_path(opts.out_dir / f"{stem}{suffix}.{ext}", reserved)
+            cut = []
+            if plan.parts > 1:
+                cut = ["-ss", f"{head + k * seg:.3f}",
+                       "-t", f"{seg + (0.5 if k < plan.parts - 1 else 0):.3f}"]
+            elif trimmed:
+                cut = (["-ss", f"{head:.3f}"] if head > 0 else []) + ["-t", f"{dur:.3f}"]
+            cmd = [*base, *cut, *inp, *tail, str(out)]
+            jt = f"{title} → {out.name}"
+            if plan.height or plan.video_kbps:
+                jt += f"  [{(str(plan.height) + 'p ') if plan.height else ''}" \
+                      f"{(str(plan.video_kbps) + ' кбит/с') if plan.video_kbps else ''}]"
+            jobs.append(Job("join", jt, cmd, out, seg, temp if k == plan.parts - 1 else []))
 
     if opts.proxies:
-        proxy_dir = out_dir / "Proxies"
+        proxy_dir = opts.out_dir / "Proxies"
         for j in list(jobs):
             out = unique_path(proxy_dir / f"{j.output.stem}.mov", reserved)
-            cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
-                   "-progress", "pipe:1", "-nostats", "-hwaccel", "auto",
-                   "-i", str(j.output), "-map", "0:v:0", "-map", "0:a:0?",
+            cmd = [*base, "-i", str(j.output), "-map", "0:v:0", "-map", "0:a:0?",
                    "-vf", "scale=960:540:flags=bilinear,format=yuv422p10le",
                    "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
                    # Premiere требует у прокси то же число аудиоканалов — копируем звук как есть
@@ -349,7 +807,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str) -> li
     return jobs
 
 
-# --------------------------------------------------------------------------- запуск
+# =========================================================================== запуск
 
 
 class Runner:
@@ -377,31 +835,33 @@ class Runner:
 
     def run(self, jobs: list[Job]) -> bool:
         ok_all = True
-        for i, job in enumerate(jobs, 1):
-            if self.cancelled:
-                return False
-            job.output.parent.mkdir(parents=True, exist_ok=True)
-            self.on_log(f"▶ {job.title}")
-            ok = self._run_one(i, len(jobs), job)
-            for t in job.temp_files:
-                try:
-                    t.unlink()
-                except OSError:
-                    pass
-            if not ok:
-                ok_all = False
-                try:
-                    if job.output.exists():
-                        job.output.unlink()
-                except OSError:
-                    pass
+        try:
+            for i, job in enumerate(jobs, 1):
                 if self.cancelled:
-                    self.on_log("■ Остановлено пользователем, недописанный файл удалён.")
                     return False
-                # если не собрался основной файл — его прокси тоже не сделать
-                continue
-            self.on_log(f"✔ Готово: {job.output}")
-        return ok_all
+                job.output.parent.mkdir(parents=True, exist_ok=True)
+                self.on_log(f"▶ {job.title}")
+                ok = self._run_one(i, len(jobs), job)
+                if not ok:
+                    ok_all = False
+                    try:
+                        if job.output.exists():
+                            job.output.unlink()
+                    except OSError:
+                        pass
+                    if self.cancelled:
+                        self.on_log("■ Остановлено пользователем, недописанный файл удалён.")
+                        return False
+                    continue
+                self.on_log(f"✔ Готово: {job.output}")
+            return ok_all
+        finally:
+            for job in jobs:
+                for t in job.temp_files:
+                    try:
+                        t.unlink()
+                    except OSError:
+                        pass
 
     def _run_one(self, i: int, n: int, job: Job) -> bool:
         if job.kind == "proxy" and not Path(job.cmd[job.cmd.index("-i") + 1]).exists():
