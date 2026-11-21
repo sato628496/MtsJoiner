@@ -156,10 +156,12 @@ STRINGS: dict[str, dict[str, str]] = {
     "audio.pcm": {"ru": "PCM 24 бит — без потерь", "en": "PCM 24-bit — lossless"},
     "audio.copy": {"ru": "AC3 — оригинал (копия)", "en": "AC3 — original (copy)"},
     "audio.aac": {"ru": "AAC", "en": "AAC"},
-    "audio.tip": {"ru": "PCM — без потерь, Premiere читает всегда (+≈3 ГБ на час). AC3 — бит-в-бит как с камеры, "
-                        "но Premiere на Windows 11 24H2+ может его не открыть. AAC — для YouTube/Telegram/плееров.",
-                  "en": "PCM — lossless, Premiere always reads it (+≈3 GB per hour). AC3 — bit-exact camera audio, "
-                        "but Premiere on Windows 11 24H2+ may not open it. AAC — for YouTube/Telegram/players."},
+    "audio.tip": {"ru": "PCM — без потерь, его читает любой видеоредактор (+≈3 ГБ на час). AC3 — бит-в-бит как с камеры, "
+                        "но некоторые редакторы его не открывают (например, Premiere Pro на Windows 11 24H2+). "
+                        "AAC — для YouTube/Telegram/плееров.",
+                  "en": "PCM — lossless, every video editor reads it (+≈3 GB per hour). AC3 — bit-exact camera audio, "
+                        "but some editors can’t open it (e.g. Premiere Pro on Windows 11 24H2+). "
+                        "AAC — for YouTube/Telegram/players."},
     "kbps": {"ru": "кбит/с", "en": "kbps"},
     "channels": {"ru": "Каналы:", "en": "Channels:"},
     "ch.51": {"ru": "5.1 как с камеры", "en": "5.1 as recorded"},
@@ -167,22 +169,24 @@ STRINGS: dict[str, dict[str, str]] = {
     "channels.tip": {"ru": "Камера пишет 5.1 со встроенных микрофонов. Стерео удобнее для телефонов и Telegram.",
                      "en": "The camera records 5.1 from its built-in mics. Stereo suits phones and Telegram better."},
     "container": {"ru": "Контейнер:", "en": "Container:"},
-    "container.tip": {"ru": "MP4 — универсальный. MOV — для Premiere/монтажа (нужен для PCM). "
-                            "MKV — для архива и плееров (Premiere его не открывает).",
-                      "en": "MP4 — universal. MOV — for Premiere/editing (needed for PCM). "
-                            "MKV — for archives and players (Premiere can’t open it)."},
+    "container.tip": {"ru": "MP4 — универсальный. MOV — для монтажа (нужен для звука PCM). "
+                            "MKV — для архива и плееров (многие видеоредакторы его не открывают).",
+                      "en": "MP4 — universal. MOV — for editing (needed for PCM audio). "
+                            "MKV — for archives and players (many video editors can’t open it)."},
     "faststart": {"ru": "Быстрый старт (для онлайн-просмотра, Telegram)",
                   "en": "Fast start (for streaming, Telegram)"},
     "faststart.tip": {"ru": "Перенести оглавление файла в начало, чтобы видео начинало играть в чате/браузере "
                             "до полной загрузки. Требует ещё одного прохода записи.",
                       "en": "Move the file index to the beginning so the video starts playing in a chat/browser "
                             "before it is fully downloaded. Costs one extra write pass."},
-    "proxies": {"ru": "Прокси для Premiere (ProRes Proxy 960×540 → папка Proxies)",
-                "en": "Premiere proxies (ProRes Proxy 960×540 → Proxies folder)"},
-    "proxies.tip": {"ru": "Лёгкие копии для плавного монтажа даже с внешнего диска. В Premiere: выделить клипы → "
-                          "Proxy → Attach Proxies → папка Proxies. Экспорт всё равно идёт из оригиналов.",
-                    "en": "Light copies for smooth editing even from an external drive. In Premiere: select clips → "
-                          "Proxy → Attach Proxies → the Proxies folder. Export still uses the originals."},
+    "proxies": {"ru": "Прокси для монтажа (ProRes Proxy 960×540 → папка Proxies)",
+                "en": "Editing proxies (ProRes Proxy 960×540 → Proxies folder)"},
+    "proxies.tip": {"ru": "Лёгкие копии для плавного монтажа даже с внешнего диска. Premiere Pro: выделить клипы → "
+                          "Proxy → Attach Proxies → папка Proxies. DaVinci Resolve: правый щелчок по клипу → "
+                          "Link Proxy Media. Экспорт всё равно идёт из оригиналов.",
+                    "en": "Light copies for smooth editing even from an external drive. Premiere Pro: select clips → "
+                          "Proxy → Attach Proxies → the Proxies folder. DaVinci Resolve: right-click a clip → "
+                          "Link Proxy Media. Export still uses the originals."},
     "out": {"ru": "Куда сохранить:", "en": "Save to:"},
     "out.auto": {"ru": "подпапка «joined» у исходников", "en": "“joined” subfolder next to sources"},
     "out.tip": {"ru": "Папка для результата. По умолчанию — подпапка joined рядом с MTS-файлами.",
@@ -223,10 +227,12 @@ STRINGS: dict[str, dict[str, str]] = {
     # ------------------------------------------------------------------ предупреждения формата
     "warn.pcm_mp4": {"ru": "PCM в MP4 не поддерживается — файл будет записан как MOV.",
                      "en": "PCM can’t go into MP4 — the file will be written as MOV."},
-    "warn.ac3": {"ru": "AC3: на Windows 11 24H2+ Premiere может не увидеть звук (нет системного декодера AC3).",
-                 "en": "AC3: Premiere on Windows 11 24H2+ may show no audio (Windows no longer ships an AC3 decoder)."},
-    "warn.mkv": {"ru": "MKV Premiere не импортирует — подходит для архива и плееров.",
-                 "en": "Premiere can’t import MKV — use it for archives and players."},
+    "warn.ac3": {"ru": "AC3: некоторые видеоредакторы не читают этот звук (например, Premiere Pro на Windows 11 24H2+). "
+                       "Для монтажа надёжнее PCM.",
+                 "en": "AC3: some video editors can’t read this audio (e.g. Premiere Pro on Windows 11 24H2+). "
+                       "PCM is safer for editing."},
+    "warn.mkv": {"ru": "MKV многие видеоредакторы не импортируют — подходит для архива и плееров.",
+                 "en": "Many video editors can’t import MKV — use it for archives and players."},
     "warn.noenc": {"ru": "В текущем ffmpeg нет рабочего кодировщика для перекодирования — нажмите «Установить ffmpeg».",
                    "en": "The current ffmpeg has no working encoder for re-encoding — press “Install ffmpeg”."},
     "warn.height": {"ru": "Совет: разрешение «авто» само уменьшит картинку до 720p, если битрейта мало.",
@@ -319,10 +325,12 @@ STRINGS: dict[str, dict[str, str]] = {
     "enc.mf": {"ru": "Windows Media Foundation", "en": "Windows Media Foundation"},
 
     # ------------------------------------------------------------------ пресеты
-    "p.premiere": {"ru": "Монтаж в Premiere — без потерь", "en": "Premiere editing — lossless"},
-    "p.premiere.hint": {"ru": "Видео 1:1 без перекодирования, звук PCM 5.1 24 бит (Premiere читает всегда). "
+    "p.edit": {"ru": "Для монтажа — без потерь", "en": "For editing — lossless"},
+    "p.edit.hint": {"ru": "Видео 1:1 без перекодирования, звук PCM 5.1 24 бит — открывается в любом видеоредакторе "
+                          "(Premiere Pro, DaVinci Resolve, Vegas, Final Cut, Shotcut…). "
                               "Идеально и для заливки на YouTube, если не жалко объёма.",
-                        "en": "Video 1:1 without re-encoding, PCM 5.1 24-bit audio (Premiere always reads it). "
+                        "en": "Video 1:1 without re-encoding, PCM 5.1 24-bit audio — opens in any video editor "
+                              "(Premiere Pro, DaVinci Resolve, Vegas, Final Cut, Shotcut…). "
                               "Also perfect for YouTube uploads if file size doesn’t matter."},
     "p.archive": {"ru": "Архив — бит-в-бит как с камеры", "en": "Archive — bit-exact as recorded"},
     "p.archive.hint": {"ru": "Видео и звук AC3 копируются без изменений, просто склеены. Минимальный объём без потерь.",
@@ -348,7 +356,7 @@ HELP = {
     "ru": """MTS JOINER — КАК ПОЛЬЗОВАТЬСЯ
 
 Зачем это нужно
-AVCHD-камера (Sony Handycam и др.) пишет одну длинную запись кусками по 2 ГБ (~10 минут). Если поставить эти куски в Premiere по отдельности, на каждом стыке ~0,77 с звука на чёрном экране и ~0,77 с картинки без звука. Программа склеивает куски обратно в цельную запись — без разрывов и без перекодирования, качество и битрейт как с камеры.
+AVCHD-камера (Sony Handycam и др.) пишет одну длинную запись кусками по 2 ГБ (~10 минут). Если поставить эти куски в видеоредактор (Premiere Pro, DaVinci Resolve, Vegas…) по отдельности, на каждом стыке ~0,77 с звука на чёрном экране и ~0,77 с картинки без звука. Программа склеивает куски обратно в цельную запись — без разрывов и без перекодирования, качество и битрейт как с камеры.
 
 Шаг ① — где лежат видео
 • «Папка с MTS» — папка с файлами .MTS (на карте: PRIVATE\\AVCHD\\BDMV\\STREAM, или их копия на диске).
@@ -361,13 +369,13 @@ AVCHD-камера (Sony Handycam и др.) пишет одну длинную �
 • 6.1 / 6.2 — части одной записи, между которыми не хватает файла (он указан в примечании).
 
 Шаг ③ — каким должен быть результат
-• Пресет «Монтаж в Premiere» — для монтажа (видео 1:1, звук PCM).
+• «Для монтажа» — для любого видеоредактора (видео 1:1, звук PCM без потерь).
 • «Архив» — бит-в-бит как с камеры.
 • «YouTube» — заливать сразу на YouTube без потерь.
 • «Telegram» — файл под лимит 2 ГБ (4 ГБ с Premium).
 • «Экономичный» — в 3–5 раз меньше, почти без видимых потерь.
 • «Файл на каждый дубль» или «все в один файл» — как удобнее монтировать.
-• «Прокси» — лёгкие копии для плавного монтажа (Premiere: Proxy → Attach Proxies).
+• «Прокси» — лёгкие копии для плавного монтажа (Premiere Pro: Proxy → Attach Proxies; DaVinci Resolve: правый щелчок по клипу → Link Proxy Media).
 
 Шаг ④ — «Склеить». Результат — в подпапке joined рядом с исходниками (или где укажете).
 
@@ -378,7 +386,7 @@ ffmpeg
 
 Частые вопросы
 • Камера записала много файлов вместо одного — это нормально? Да, так работают все AVCHD-камеры (лимит 2 ГБ на файл). Программа соберёт их обратно.
-• Premiere не видит звук в MTS — выберите звук PCM (пресет «Монтаж»).
+• Видеоредактор не видит звук в MTS (частая ситуация с Premiere Pro на Windows 11) — выберите звук PCM (пресет «Для монтажа»).
 • Можно переименовать файлы, чтобы они проигрались как один? Нет, плейлист камеры ссылается на имена. А программа узнает переименованные файлы по метаданным.
 • Пропал один файл — запись будет в двух частях; в режиме «в один файл» части склеятся встык.
 • Тормозит предпросмотр — включите «Прокси».
@@ -386,7 +394,7 @@ ffmpeg
     "en": """MTS JOINER — HOW TO USE
 
 Why
-An AVCHD camcorder (Sony Handycam etc.) splits one long recording into 2 GB pieces (~10 minutes). Put those pieces into Premiere one by one and every join gets ~0.77 s of audio over black and ~0.77 s of picture without sound. This program joins the pieces back into one recording — seamlessly and without re-encoding, at the camera’s quality and bitrate.
+An AVCHD camcorder (Sony Handycam etc.) splits one long recording into 2 GB pieces (~10 minutes). Put those pieces into a video editor (Premiere Pro, DaVinci Resolve, Vegas…) one by one and every join gets ~0.77 s of audio over black and ~0.77 s of picture without sound. This program joins the pieces back into one recording — seamlessly and without re-encoding, at the camera’s quality and bitrate.
 
 Step ① — where are the videos
 • “MTS folder” — the folder with .MTS files (on the card: PRIVATE\\AVCHD\\BDMV\\STREAM, or a copy on disk).
@@ -399,13 +407,13 @@ Step ② — what to join
 • 6.1 / 6.2 — parts of one recording with a missing file in between (named in the note).
 
 Step ③ — what the result should be
-• “Premiere editing” — for editing (video 1:1, PCM audio).
+• “For editing” — for any video editor (video 1:1, lossless PCM audio).
 • “Archive” — bit-exact as recorded.
 • “YouTube” — upload straight to YouTube without loss.
 • “Telegram” — fits the 2 GB limit (4 GB with Premium).
 • “Compact” — 3–5× smaller, nearly no visible loss.
 • “One file per take” or “all in one file” — whatever is easier to edit.
-• “Proxies” — light copies for smooth editing (Premiere: Proxy → Attach Proxies).
+• “Proxies” — light copies for smooth editing (Premiere Pro: Proxy → Attach Proxies; DaVinci Resolve: right-click a clip → Link Proxy Media).
 
 Step ④ — “Join”. The result goes to a “joined” subfolder next to the sources (or wherever you choose).
 
@@ -416,7 +424,7 @@ The program uses the free ffmpeg. No ffmpeg? Use the “Install ffmpeg” button
 
 FAQ
 • My camera recorded many files instead of one — is that normal? Yes, every AVCHD camera does this (2 GB per file limit). The program joins them back.
-• Premiere shows no audio for MTS — choose PCM audio (the “Premiere editing” preset).
+• Your editor shows no audio for MTS (common with Premiere Pro on Windows 11) — choose PCM audio (the “For editing” preset).
 • Can I rename the files so they play as one? No, the camera playlist refers to file names. The program, however, recognizes renamed files using the metadata.
 • One file is missing — the recording comes out in two parts; in “one file” mode they are butted together.
 • Preview stutters — enable “Proxies”.

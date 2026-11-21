@@ -4,8 +4,8 @@
 
 A free Windows tool that joins the `.MTS` files your AVCHD camcorder split a recording into (Sony
 Handycam, Panasonic, Canon, JVC) back into whole recordings — **no re-encoding, no quality loss and no
-gaps at the joins** (no black frames or missing audio between clips in Premiere Pro). Plus ready-made
-presets for **Premiere editing, YouTube, Telegram** and **compact storage (HEVC)**.
+gaps at the joins** (no black frames or missing audio between clips in your video editor). Plus ready-made
+presets for **editing, YouTube, Telegram** and **compact storage (HEVC)**. Free, [MIT](LICENSE) license.
 
 ![MTS Joiner](docs/screenshot_en.png)
 
@@ -19,16 +19,18 @@ You film a concert, wedding, lecture or stage show on an AVCHD camcorder — and
 hour-long video the card holds **10-minute files**: `00142.MTS`, `00143.MTS`, `00144.MTS`… The camera
 splits the recording into **2 GB** pieces (a memory card file-system limit).
 
-Put those pieces back to back in Premiere Pro (or DaVinci Resolve, Vegas, etc.) and **every join** gets:
+Put those pieces back to back in a video editor (Premiere Pro, DaVinci Resolve, Vegas, Final Cut, Shotcut…)
+and **every join** gets:
 
 - **~0.77 s of black screen with sound** at the start of a piece;
 - **~0.77 s of picture without sound** at the end of the previous one.
 
-On top of that: heavy files on an external drive (laggy preview) and **AC3 5.1** audio that Premiere on
-a recent Windows 11 may not read at all.
+On top of that: heavy files on an external drive (laggy preview) and **AC3 5.1** audio that some editors
+can’t read (e.g. Premiere Pro on a recent Windows 11).
 
 **MTS Joiner** joins the pieces back **byte by byte**, the way the camera recorded them — the joins
-disappear completely and the video stays bit-identical to the camera original.
+disappear completely and the video stays bit-identical to the camera original. The result is a regular
+MP4/MOV that opens in any video editor or player.
 
 ## Features
 
@@ -39,9 +41,9 @@ disappear completely and the video stays bit-identical to the camera original.
   files**, **names missing ones**, drops duplicates.
 - 🧩 **A file is missing?** You still get the parts before and after the gap, without black edges.
 - 📦 **Output:** one file per take or **the whole show in one file**.
-- 🎚 **Presets:** Premiere (lossless PCM), Archive (bit-exact), YouTube, Telegram (fits 2/4 GB),
+- 🎚 **Presets:** For editing (lossless PCM), Archive (bit-exact), YouTube, Telegram (fits 2/4 GB),
   Compact (HEVC, 3–5× smaller).
-- 🪶 **Premiere proxies** (ProRes Proxy) — smooth editing even from an external HDD.
+- 🪶 **Editing proxies** (ProRes Proxy) — smooth editing even from an external HDD.
 - ⚡ **GPU encoding:** NVIDIA NVENC / AMD AMF / Intel QuickSync chosen automatically (only working ones).
 - 🌐 **English and Russian UI**, hover tips on every control, built-in help.
 - 💾 **Portable:** a single `.exe`, nothing to install; source files are only read, never modified.
@@ -63,7 +65,7 @@ disappear completely and the video stays bit-identical to the camera original.
 
 | Preset | Video | Audio | Use |
 |---|---|---|---|
-| **Premiere editing — lossless** | copy 1:1 | PCM 5.1 24-bit, MOV | Editing; Premiere always reads PCM |
+| **For editing — lossless** | copy 1:1 | PCM 5.1 24-bit, MOV | Editing in any editor: everyone reads PCM |
 | **Archive — bit-exact** | copy 1:1 | AC3 5.1 (copy), MP4 | Keep it “as recorded”, smallest lossless size |
 | **YouTube — lossless** | copy 1:1 (≈25 Mbps) | AAC 512 kbps 5.1, MP4 | Direct upload: video above YouTube’s recommendation, audio at its top |
 | **Telegram — fit the limit** | H.264, auto 1080p/720p | AAC 192 kbps stereo, MP4 + fast start | Fits 2 GB (Premium 4 GB); long recordings split into parts |
@@ -127,27 +129,28 @@ Every AVCHD camera does this: the memory card uses FAT32/exFAT and the camera sp
 MTS Joiner puts it back together.
 
 ### How do I join MTS files from a Sony (Panasonic, Canon) camcorder into one file without losing quality?
-Choose the MTS folder, press “Find takes”, pick the “Premiere editing” or “Archive” preset and press
+Choose the MTS folder, press “Find takes”, pick the “For editing” or “Archive” preset and press
 “Join”. The video is copied without re-encoding — camera quality and bitrate.
 
-### Why are there black frames or missing audio between MTS clips in Premiere Pro?
+### Why are there black frames or missing audio between MTS clips in my video editor?
 Inside MTS (MPEG-TS) the audio is stored ~0.77 s ahead of the video, so the start of the next piece’s
-audio physically sits at the end of the previous file and vice versa. Premiere aligns each file on its
-own — hence ~0.77 s of black with sound and picture without sound at every join. After a byte-level join
+audio physically sits at the end of the previous file and vice versa. The editor aligns each file on its
+own (Premiere Pro, DaVinci Resolve, Vegas, …) — hence ~0.77 s of black with sound and picture without sound at every join. After a byte-level join
 with this program there are no seams.
 
-### Premiere Pro shows no audio for MTS / AC3 not supported (Windows 11 24H2)
-Premiere relies on the Windows AC3 decoder, which recent Windows 11 builds no longer ship — MTS imports
-silently. Use the **“Premiere editing”** preset: the audio is converted to **PCM** (lossless) that Premiere
-always reads.
+### My editor shows no audio for MTS / AC3 not supported (Premiere Pro, Windows 11 24H2)
+Camera audio is AC3 (Dolby Digital) and not every editor supports it: e.g. Premiere Pro relies on the
+Windows AC3 decoder, which recent Windows 11 builds no longer ship, so MTS imports silently. Use the
+**“For editing”** preset: the audio is converted to **PCM** (lossless) that every video editor reads.
 
-### Premiere Pro won’t open MTS files or AVCHD spanned clips — what to do?
-Join them into MOV (video 1:1 + PCM audio) with the “Premiere editing” preset — the standard, most
-reliable option for Premiere.
+### My editor won’t open MTS files or AVCHD spanned clips — what to do?
+Join them into MOV (video 1:1 + PCM audio) with the “For editing” preset — the most compatible option
+for Premiere Pro, DaVinci Resolve, Vegas, Final Cut and others.
 
-### MTS preview lags in Premiere (especially from an external drive)
-Tick **“Premiere proxies”**: ProRes Proxy 960×540 copies are created. In Premiere select the clips →
-*Proxy → Attach Proxies* → the `Proxies` folder. Editing becomes smooth; export still uses the originals.
+### MTS preview lags while editing (especially from an external drive)
+Tick **“Editing proxies”**: ProRes Proxy 960×540 copies are created in a `Proxies` folder. Attach them in
+your editor: Premiere Pro — *Proxy → Attach Proxies*; DaVinci Resolve — right-click a clip → *Link Proxy
+Media*. Editing becomes smooth; export still uses the originals.
 
 ### Can I just rename the MTS files so they play as one video?
 No. The camera playlist (`PLAYLIST\*.MPL`) refers to clips **by name**, renaming breaks it. MTS Joiner,
@@ -168,7 +171,7 @@ The missing piece can’t be recovered, but nothing else is lost. The recording 
 parts butted together, with the edges near the gap trimmed so there is no black-with-sound.
 
 ### How do I convert MTS to MP4 or MOV without re-encoding?
-“Archive” (MP4, bit-exact video and audio) or “Premiere editing” (MOV, video 1:1 + PCM). It’s basically
+“Archive” (MP4, bit-exact video and audio) or “For editing” (MOV, video 1:1 + PCM). It’s basically
 a copy: 35 minutes of footage take ~2–3 minutes depending on the drive.
 
 ### How do I send a long video to Telegram (2 GB limit)?
@@ -198,6 +201,9 @@ driver (ffmpeg 9 — driver 610+). Update the driver or use an older ffmpeg (8.x
 ### Does it modify or delete my source files?
 No. Source MTS and metadata are only read; results go to a separate folder.
 
+### Is it free?
+Yes — open source under the [MIT](LICENSE) license: use, modify and share it freely, commercially too.
+
 ---
 
 ## Building from source
@@ -213,6 +219,6 @@ py -m pip install pyinstaller
 ---
 
 *Keywords: join MTS files, merge MTS into one file, camcorder split video into multiple files, 2 GB file
-split, AVCHD spanned clips, lossless MTS to MP4, Premiere Pro MTS black frames between clips, Premiere no
-audio AC3, Sony Handycam HDR-CX join video, Panasonic HC-V MTS, Canon VIXIA MTS, MTS converter for
-YouTube and Telegram, Premiere proxies.*
+split, AVCHD spanned clips, lossless MTS to MP4, MTS black frames between clips, video editor no
+audio AC3, DaVinci Resolve MTS, Vegas MTS, Sony Handycam HDR-CX join video, Panasonic HC-V MTS, Canon VIXIA MTS, MTS converter for
+YouTube and Telegram, editing proxies.*

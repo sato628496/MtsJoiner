@@ -546,7 +546,7 @@ class Preset:
 
 
 PRESETS = [
-    Preset("premiere", dict(container="mov", video="copy", audio="pcm", stereo=False, faststart=False)),
+    Preset("edit", dict(container="mov", video="copy", audio="pcm", stereo=False, faststart=False)),
     Preset("archive", dict(container="mp4", video="copy", audio="copy", stereo=False, faststart=False)),
     Preset("youtube", dict(container="mp4", video="copy", audio="aac", audio_kbps=512, stereo=False,
                            faststart=True)),
@@ -564,7 +564,7 @@ def apply_preset(opts: Options, key: str) -> Options:
 
 
 def effective_container(opts: Options) -> str:
-    # PCM в MP4 Premiere/плееры не читают — пишем MOV
+    # PCM в MP4 видеоредакторы и плееры не читают — пишем MOV
     if opts.audio == "pcm" and opts.container == "mp4":
         return "mov"
     return opts.container
@@ -823,7 +823,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
             cmd = [*base, "-i", str(j.output), "-map", "0:v:0", "-map", "0:a:0?",
                    "-vf", "scale=960:540:flags=bilinear,format=yuv422p10le",
                    "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
-                   # Premiere требует у прокси то же число аудиоканалов — копируем звук как есть
+                   # видеоредакторы требуют у прокси то же число аудиоканалов — копируем звук как есть
                    "-c:a", "copy", str(out)]
             jobs.append(Job("proxy", f"{T('core.proxy')} → {out.name}", cmd, out, j.duration))
     return jobs

@@ -111,7 +111,7 @@ class App(tk.Tk):
         self._applying = False
         self._ff_manual = bool(s.get("ffmpeg_manual"))
         self.saved_encoder = s.get("encoder", "")
-        self.preset_key = s.get("preset", "premiere")
+        self.preset_key = {"premiere": "edit"}.get(s.get("preset"), s.get("preset") or "edit")
         self.log_lines: list[str] = []
 
         d = core.Options()
