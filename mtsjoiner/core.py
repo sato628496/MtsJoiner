@@ -180,6 +180,7 @@ class Clip:
     interlaced: bool = False
     error: str | None = None
     meta_name: str | None = None      # имя клипа по метаданным камеры
+    selected: bool = True             # пользователь может исключить отдельный файл из дубля
 
     @property
     def v_end(self) -> float | None:
@@ -204,10 +205,43 @@ class Take:
     start_dt: datetime | None = None
     from_meta: bool = False
     selected: bool = True
+    seg: int = 0                   # номер отрезка, если пользователь снял галочки с части файлов
 
     @property
     def label(self) -> str:
-        return f"{self.rec_no}.{self.part}" if self.parts_total > 1 else str(self.rec_no)
+        # части записи с пропавшим файлом — буквами (6a, 6b), файлы внутри дубля — 6.1, 6.2…
+        if self.parts_total > 1:
+            return f"{self.rec_no}{'abcdefghijklmnopqrstuvwxyz'[(self.part - 1) % 26]}"
+        return str(self.rec_no)
+
+    def clip_label(self, i: int) -> str:
+        return f"{self.label}.{i + 1}"
+
+    def clip_start(self, c: "Clip") -> datetime:
+        first = self.clips[0]
+        off = (c.v_start - first.v_start) if c.v_start is not None and first.v_start is not None else 0
+        return self.approx_start + timedelta(seconds=off)
+
+    @property
+    def selection_state(self) -> str:
+        """all / none / some — для галочки дубля."""
+        n = sum(1 for c in self.clips if c.selected)
+        if not self.selected or n == 0:
+            return "none"
+        return "all" if n == len(self.clips) else "some"
+
+    def segments(self) -> list[list["Clip"]]:
+        """Подряд идущие выбранные файлы. Снятая галочка в середине делит дубль на отрезки."""
+        segs, cur = [], []
+        for c in self.clips:
+            if c.selected:
+                cur.append(c)
+            elif cur:
+                segs.append(cur)
+                cur = []
+        if cur:
+            segs.append(cur)
+        return segs
 
     @property
     def duration(self) -> float:
@@ -736,10 +770,26 @@ def estimate_output_size(takes: list[Take], opts: Options) -> int:
     return int(total)
 
 
+def expand_selection(takes: list[Take]) -> list[Take]:
+    """Выбранные дубли → список того, что реально пойдёт в работу (с учётом галочек у файлов)."""
+    out: list[Take] = []
+    for t in takes:
+        if not t.selected:
+            continue
+        segs = t.segments()
+        for k, seg in enumerate(segs, 1):
+            out.append(replace(t, clips=seg, seg=k if len(segs) > 1 else 0))
+    return out
+
+
+def is_everything_selected(takes: list[Take]) -> bool:
+    return all(t.selected and all(c.selected for c in t.clips) for t in takes)
+
+
 def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
                available: dict[str, list[str]] | None = None) -> list[Job]:
-    total_rows = len(takes)
-    takes = [t for t in takes if t.selected]
+    everything = is_everything_selected(takes)
+    takes = expand_selection(takes)
     ext = effective_container(opts)
     reserved: set[Path] = set()
     base = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
@@ -753,7 +803,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
     # источники: (название, аргументы входа, начальный сдвиг, длительность, имя файла, обрезка)
     sources: list[tuple[str, list[str], float, float, str, bool]] = []
     if opts.single_file and len(takes) > 1:
-        name = (f"{prefix}_{T('file.concert')}" if len(takes) == total_rows
+        name = (f"{prefix}_{T('file.concert')}" if everything
                 else f"{prefix}_{T('file.takes')}_{takes[0].label}-{takes[-1].label}")
         lines = ["ffconcat version 1.0"]
         total = 0.0
@@ -780,7 +830,8 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
             span = t.first_name + (f"-{t.last_name}" if len(t.clips) > 1 else "")
             part = f"_{T('file.part')}{t.part}" if t.parts_total > 1 else ""
             head, dur = t.trim()
-            sources.append((T("core.take", label=t.label), ["-i", concat_url(t)], head,
+            title = T("core.take", label=t.label) + (f" ({span})" if t.seg else "")
+            sources.append((title, ["-i", concat_url(t)], head,
                             dur if dur is not None else t.duration,
                             f"{prefix}_{T('file.take')}{t.rec_no:02d}{part}_{span}", dur is not None))
 
@@ -857,6 +908,8 @@ class Runner:
 
     def run(self, jobs: list[Job]) -> bool:
         ok_all = True
+        self.done_files: list[Path] = []
+        self.failed: int = 0
         try:
             for i, job in enumerate(jobs, 1):
                 if self.cancelled:
@@ -866,6 +919,8 @@ class Runner:
                 ok = self._run_one(i, len(jobs), job)
                 if not ok:
                     ok_all = False
+                    if not self.cancelled:
+                        self.failed += 1
                     try:
                         if job.output.exists():
                             job.output.unlink()
@@ -875,6 +930,7 @@ class Runner:
                         self.on_log(T("run.stopped"))
                         return False
                     continue
+                self.done_files.append(job.output)
                 self.on_log(T("run.done", path=job.output))
             return ok_all
         finally:

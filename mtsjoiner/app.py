@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -19,7 +20,7 @@ from .i18n import HELP, LANGS, T, detect_lang, get_lang, set_lang
 
 APP_NAME = "MTS Joiner"
 SETTINGS_PATH = Path(os.environ.get("APPDATA", Path.home())) / "MtsJoiner" / "settings.json"
-CHECK_ON, CHECK_OFF = "☑", "☐"
+CHECK_ON, CHECK_OFF, CHECK_SOME = "☑", "☐", "◪"
 FFMPEG_PAGE = "https://www.gyan.dev/ffmpeg/builds/"
 CREATE_NEW_CONSOLE = 0x00000010
 
@@ -101,6 +102,11 @@ class App(tk.Tk):
         super().__init__()
         s = self.settings = load_settings()
         set_lang(s.get("lang") or detect_lang())
+        try:  # иконка окна (и всех дочерних окон)
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+            self.iconbitmap(default=str(base / "assets" / "icon.ico"))
+        except Exception:
+            pass
         self.takes: list[core.Take] = []
         self.ff: tuple[str, str | None] | None = None
         self.ff_ver = ""
@@ -135,6 +141,8 @@ class App(tk.Tk):
         self.var_stereo = tk.BooleanVar(value=s.get("stereo", d.stereo))
         self.var_faststart = tk.BooleanVar(value=s.get("faststart", d.faststart))
         self.var_proxies = tk.BooleanVar(value=s.get("proxies", False))
+        self.var_sound = tk.BooleanVar(value=s.get("sound", True))
+        self._t_start = 0.0
         self.var_status = tk.StringVar()
         self.var_meta_info = tk.StringVar()
         self.var_ff_info = tk.StringVar()
@@ -228,7 +236,8 @@ class App(tk.Tk):
         mid = ttk.LabelFrame(self, text=T("step2"), style="Step.TLabelframe")
         mid.pack(fill="both", expand=True, **pad)
         cols = ("sel", "take", "files", "start", "dur", "size", "note")
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended", height=9)
+        self.tree = ttk.Treeview(mid, columns=cols, show="tree headings", selectmode="extended", height=9)
+        self.tree.column("#0", width=34, minwidth=34, stretch=False)  # ▸ раскрыть файлы дубля
         heads = {"sel": ("", 36), "take": (T("col.take"), 60), "files": (T("col.files"), 270),
                  "start": (T("col.start"), 130), "dur": (T("col.dur"), 110),
                  "size": (T("col.size"), 85), "note": (T("col.note"), 250)}
@@ -402,6 +411,9 @@ class App(tk.Tk):
         self.btn_stop = ttk.Button(run, text=T("stop"), command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=6)
         ttk.Button(run, text=T("open"), command=self.open_out).pack(side="left")
+        cbx = ttk.Checkbutton(run, text=T("sound"), variable=self.var_sound, command=self._save)
+        cbx.pack(side="left", padx=(10, 0))
+        Tooltip(cbx, "sound.tip")
         self.pb = ttk.Progressbar(run, mode="determinate", maximum=1000)
         self.pb.pack(side="left", fill="x", expand=True, padx=10)
         ttk.Label(self, textvariable=self.var_status, wraplength=1050).pack(fill="x", padx=12)
@@ -583,7 +595,8 @@ class App(tk.Tk):
             mode=self.var_mode.get(), preset=self.preset_key,
             container=o.container, video=o.video, encoder=o.encoder, rate_mode=o.rate_mode,
             quality=o.quality, size_limit_mb=o.size_limit_mb, height=o.height, audio=o.audio,
-            audio_kbps=o.audio_kbps, stereo=o.stereo, faststart=o.faststart, proxies=o.proxies)
+            audio_kbps=o.audio_kbps, stereo=o.stereo, faststart=o.faststart, proxies=o.proxies,
+            sound=bool(self.var_sound.get()))
         save_settings(self.settings)
 
     # ================================================================== ffmpeg
@@ -764,43 +777,105 @@ class App(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _tags(self, t: core.Take):
+    # ---------------------------------------------------------------- дерево «дубль → файлы»
+    # iid строки дубля: "t<index>", строки файла: "t<index>c<номер файла>"
+    def _parse_iid(self, iid: str) -> tuple[core.Take, int | None]:
+        tpart, _, cpart = iid[1:].partition("c")
+        t = self.takes[int(tpart) - 1]
+        return t, (int(cpart) if cpart else None)
+
+    def _take_values(self, t: core.Take):
+        notes = []
+        if t.note:
+            notes.append("⚠ " + t.note)
+        if len(t.clips) > 1:
+            notes.append(T("note.seamless"))
+        if t.has_error:
+            notes.append("; ".join(c.error for c in t.clips if c.error))
+        state = t.selection_state
+        if state == "some":
+            notes.insert(0, T("note.partial", n=sum(c.selected for c in t.clips), total=len(t.clips)))
+        mark = {"all": CHECK_ON, "none": CHECK_OFF, "some": CHECK_SOME}[state]
+        start = t.approx_start.strftime("%d.%m %H:%M:%S") + ("" if t.from_meta else " " + T("approx"))
+        dur = core.fmt_dur(t.duration)
+        if state == "some":
+            dur = f"{core.fmt_dur(sum(s.duration for s in core.expand_selection([t])))} / {dur}"
+        return (mark, t.label, t.files_label, start, dur, core.fmt_size(t.size), "; ".join(notes))
+
+    def _take_tags(self, t: core.Take):
         if t.has_error:
             return ("err",)
-        if not t.selected:
+        if t.selection_state == "none":
             return ("off",)
         return ("warn",) if t.note else ()
 
+    def _clip_values(self, t: core.Take, i: int):
+        c = t.clips[i]
+        start = t.clip_start(c).strftime("%d.%m %H:%M:%S") + ("" if t.from_meta else " " + T("approx"))
+        note = c.error or ("" if c.selected and t.selected else T("note.excluded"))
+        mark = CHECK_ON if c.selected and t.selected else CHECK_OFF
+        return (mark, t.clip_label(i), c.path.name, start, core.fmt_dur(c.v_dur or 0),
+                core.fmt_size(c.size), note)
+
+    def _clip_tags(self, t: core.Take, i: int):
+        c = t.clips[i]
+        if c.error:
+            return ("err",)
+        return () if c.selected and t.selected else ("off",)
+
     def _fill_tree(self):
+        opened = {iid for iid in self.tree.get_children() if self.tree.item(iid, "open")}
         self.tree.delete(*self.tree.get_children())
         for t in self.takes:
-            notes = []
-            if t.note:
-                notes.append("⚠ " + t.note)
+            tid = f"t{t.index}"
+            self.tree.insert("", "end", iid=tid, open=tid in opened, tags=self._take_tags(t),
+                             values=self._take_values(t))
             if len(t.clips) > 1:
-                notes.append(T("note.seamless"))
-            if t.has_error:
-                notes.append("; ".join(c.error for c in t.clips if c.error))
-            start = t.approx_start.strftime("%d.%m %H:%M:%S") + ("" if t.from_meta else " " + T("approx"))
-            self.tree.insert("", "end", iid=str(t.index), tags=self._tags(t), values=(
-                CHECK_ON if t.selected else CHECK_OFF, t.label, t.files_label, start,
-                core.fmt_dur(t.duration), core.fmt_size(t.size), "; ".join(notes)))
+                for i in range(len(t.clips)):
+                    self.tree.insert(tid, "end", iid=f"{tid}c{i}", tags=self._clip_tags(t, i),
+                                     values=self._clip_values(t, i))
         self._update_sel_label()
 
+    def _refresh_take(self, t: core.Take):
+        tid = f"t{t.index}"
+        self.tree.item(tid, values=self._take_values(t), tags=self._take_tags(t))
+        for i in range(len(t.clips) if len(t.clips) > 1 else 0):
+            self.tree.item(f"{tid}c{i}", values=self._clip_values(t, i), tags=self._clip_tags(t, i))
+
     def _update_sel_label(self):
-        sel = [t for t in self.takes if t.selected]
-        self.lbl_sel.configure(text=T("sel.info", n=len(sel), total=len(self.takes),
-                                      dur=core.fmt_dur(sum(t.duration for t in sel)),
-                                      size=core.fmt_size(sum(t.size for t in sel))))
+        parts = core.expand_selection(self.takes)
+        n = len({t.index for t in parts})
+        self.lbl_sel.configure(text=T("sel.info", n=n, total=len(self.takes),
+                                      dur=core.fmt_dur(sum(t.duration for t in parts)),
+                                      size=core.fmt_size(sum(t.size for t in parts))))
+
+    @staticmethod
+    def _set_take(t: core.Take, on: bool):
+        t.selected = on
+        for c in t.clips:
+            c.selected = on
 
     def _toggle(self, iids):
         if self.busy:
             return
+        touched: dict[int, core.Take] = {}
         for iid in iids:
-            t = self.takes[int(iid) - 1]
-            t.selected = not t.selected
-            self.tree.set(iid, "sel", CHECK_ON if t.selected else CHECK_OFF)
-            self.tree.item(iid, tags=self._tags(t))
+            t, ci = self._parse_iid(iid)
+            if ci is None:
+                self._set_take(t, t.selection_state != "all")
+            else:
+                c = t.clips[ci]
+                if not t.selected:  # дубль был выключен целиком — включаем только этот файл
+                    for other in t.clips:
+                        other.selected = False
+                    t.selected = True
+                    c.selected = True
+                else:
+                    c.selected = not c.selected
+                t.selected = any(x.selected for x in t.clips)
+            touched[t.index] = t
+        for t in touched.values():
+            self._refresh_take(t)
         self._update_sel_label()
 
     def _on_tree_click(self, ev):
@@ -820,7 +895,7 @@ class App(tk.Tk):
         if self.busy:
             return
         for t in self.takes:
-            t.selected = pred(t)
+            self._set_take(t, pred(t))
         self._fill_tree()
 
     def _set_busy(self, busy: bool):
@@ -837,7 +912,7 @@ class App(tk.Tk):
             self._detect_ffmpeg()
             if not self.ff:
                 return
-        sel = [t for t in self.takes if t.selected]
+        sel = core.expand_selection(self.takes)
         if not sel:
             messagebox.showinfo(APP_NAME, T("dlg.nosel"))
             return
@@ -881,12 +956,93 @@ class App(tk.Tk):
         self._set_busy(True)
         self.pb.configure(value=0)
         runner = self.runner
+        self._t_start = time.monotonic()
 
         def work():
             ok = runner.run(jobs)
-            self.msgs.put(("done", ok, runner.cancelled))
+            self.msgs.put(("done", ok, runner.cancelled, runner))
 
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------------------------------------------------------------- окончание работы
+    def _attention(self, ok: bool):
+        """Звук + мигание кнопки на панели задач + окно поверх остальных."""
+        if self.var_sound.get():
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK if ok else winsound.MB_ICONHAND)
+            except Exception:
+                self.bell()
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
+                            ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            fi = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3 | 0xC, 0, 0)  # FLASHW_ALL | FLASHW_TIMERNOFG
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(fi))
+        except Exception:
+            pass
+        if self.state() == "iconic":
+            self.deiconify()
+
+    def _finish(self, ok: bool, runner: core.Runner):
+        self._attention(ok)
+        files = list(getattr(runner, "done_files", []))
+        failed = getattr(runner, "failed", 0)
+        size = sum(p.stat().st_size for p in files if p.exists())
+        elapsed = core.fmt_dur(time.monotonic() - self._t_start)
+
+        win = tk.Toplevel(self)
+        win.title(APP_NAME)
+        win.transient(self)
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.after(1500, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+        body = ttk.Frame(win, padding=18)
+        body.pack(fill="both", expand=True)
+        color = "#1b7f2a" if ok else "#b00020"
+        tk.Label(body, text="✔" if ok else "⚠", font=("Segoe UI", 30, "bold"), fg=color).grid(
+            row=0, column=0, rowspan=2, sticky="n", padx=(0, 14))
+        ttk.Label(body, text=T("done.title.ok" if ok else "done.title.fail"),
+                  font=("Segoe UI", 13, "bold")).grid(row=0, column=1, sticky="w")
+        summary = T("done.summary", n=len(files), size=core.fmt_size(size), time=elapsed)
+        if failed:
+            summary += "\n" + T("done.failed", n=failed)
+        ttk.Label(body, text=summary, justify="left").grid(row=1, column=1, sticky="w", pady=(4, 8))
+        if files:
+            lb = tk.Listbox(body, height=min(8, len(files)), width=70, activestyle="none",
+                            font=("Segoe UI", 9))
+            for p in files:
+                lb.insert("end", p.name)
+            lb.grid(row=2, column=0, columnspan=2, sticky="ew")
+            if files[0].parent.exists():
+                ttk.Label(body, text=str(files[0].parent), style="Hint.TLabel").grid(
+                    row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        btns = ttk.Frame(body)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+        def open_and_close():
+            if files and files[0].parent.exists():
+                os.startfile(files[0].parent)
+            else:
+                self.open_out()
+            win.destroy()
+
+        b = ttk.Button(btns, text=T("done.open"), command=open_and_close)
+        b.pack(side="left", padx=4)
+        ttk.Button(btns, text=T("done.close"), command=win.destroy).pack(side="left")
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Return>", lambda e: open_and_close())
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.lift()
+        win.focus_force()
+        b.focus_set()
 
     def stop(self):
         if self.runner:
@@ -938,19 +1094,19 @@ class App(tk.Tk):
                 elif kind == "log":
                     self.write_log(msg[1])
                 elif kind == "done":
-                    _, ok, cancelled = msg
+                    _, ok, cancelled, runner = msg
                     self.runner = None
                     self._set_busy(False)
                     if cancelled:
                         self.var_status.set(T("status.stopped"))
-                    elif ok:
-                        self.pb.configure(value=1000)
-                        self.var_status.set(T("status.done"))
-                        self.write_log(T("log.done"))
-                        if messagebox.askyesno(APP_NAME, T("dlg.done")):
-                            self.open_out()
                     else:
-                        self.var_status.set(T("status.failed"))
+                        if ok:
+                            self.pb.configure(value=1000)
+                            self.var_status.set(T("status.done"))
+                            self.write_log(T("log.done"))
+                        else:
+                            self.var_status.set(T("status.failed"))
+                        self._finish(ok, runner)
                 elif kind == "error":
                     self._set_busy(False)
                     self.var_status.set(msg[1])

@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="96" align="left" alt="MTS Joiner icon">
+
 # MTS Joiner — join split camcorder MTS files into one video, losslessly
 
 **[Русская версия →](README.md)**
@@ -39,12 +41,15 @@ MP4/MOV that opens in any video editor or player.
   automatically.
 - 📋 **Reads the camera metadata** (`PLAYLIST`/`CLIPINF`): exact recording time, **recognizes renamed
   files**, **names missing ones**, drops duplicates.
-- 🧩 **A file is missing?** You still get the parts before and after the gap, without black edges.
+- 🗂 **Pick files inside a take:** expand a take to see all its files (12.1, 12.2, 12.3…) with time and size;
+  untick an unwanted piece (untick one in the middle and the take is saved as two segments).
+- 🧩 **A file is missing?** You still get the parts before and after the gap (`6a`, `6b`), without black edges.
 - 📦 **Output:** one file per take or **the whole show in one file**.
 - 🎚 **Presets:** For editing (lossless PCM), Archive (bit-exact), YouTube, Telegram (fits 2/4 GB),
   Compact (HEVC, 3–5× smaller).
 - 🪶 **Editing proxies** (ProRes Proxy) — smooth editing even from an external HDD.
 - ⚡ **GPU encoding:** NVIDIA NVENC / AMD AMF / Intel QuickSync chosen automatically (only working ones).
+- 🔔 **Sound and summary window when finished** — do something else, the program will call you.
 - 🌐 **English and Russian UI**, hover tips on every control, built-in help.
 - 💾 **Portable:** a single `.exe`, nothing to install; source files are only read, never modified.
 
@@ -55,6 +60,7 @@ MP4/MOV that opens in any video editor or player.
    preferably, the **camera metadata** — the `PRIVATE`, `AVCHD` or `BDMV` folder from the card (or a
    copy). Press **“Find takes”**.
 3. **② What to join:** tick ☑ the takes you need (“Only longer than 1 min” drops accidental short clips).
+   The ▸ arrow expands a take’s files (12.1, 12.2…) — untick any single piece you don’t want.
 4. **③ What the result should be:** pick a preset and output mode — one file per take or all in one.
 5. **④ Join.** The results appear in a `joined` subfolder next to the sources.
 
@@ -167,8 +173,13 @@ numbered names (`00142.MTS`) for ordering.
 
 ### One file of a recording is lost or damaged — what happens?
 The missing piece can’t be recovered, but nothing else is lost. The recording shows up in parts (e.g.
-`6.1` and `6.2`) marked “⚠ missing file 00144 (≈10:35)”. You get two files, or — in “one file” mode — the
+`6a` and `6b`) marked “⚠ missing file 00144 (≈10:35)”. You get two files, or — in “one file” mode — the
 parts butted together, with the edges near the gap trimmed so there is no black-with-sound.
+
+### Can I leave out some files of a recording?
+Yes. Click the ▸ arrow next to a take to see its files (`12.1`, `12.2`, `12.3`…) with start time, duration
+and size, and untick the ones you don’t need. Untick one in the middle and the take is saved as two
+segments (before and after) without black edges. A ◪ mark means only some files of the take are selected.
 
 ### How do I convert MTS to MP4 or MOV without re-encoding?
 “Archive” (MP4, bit-exact video and audio) or “For editing” (MOV, video 1:1 + PCM). It’s basically

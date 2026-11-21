@@ -81,11 +81,17 @@ STRINGS: dict[str, dict[str, str]] = {
     "col.size": {"ru": "Размер", "en": "Size"},
     "col.note": {"ru": "Примечание", "en": "Note"},
     "tree.tip": {"ru": "Щёлкните по ☑, чтобы включить/выключить дубль (или выделите строки и нажмите Пробел). "
-                       "Длинная запись состоит из нескольких файлов по 2 ГБ — они склеиваются без разрывов. "
-                       "Номер вида 6.1 / 6.2 — части одной записи, между которыми не хватает файла.",
+                       "Стрелка ▸ слева раскрывает файлы дубля (12.1, 12.2…) — у каждого своя галочка: можно "
+                       "убрать лишний кусок; если снять файл в середине, дубль сохранится двумя отрезками. "
+                       "◪ — в дубле выбрана только часть файлов. Номер вида 6a / 6b — части одной записи, "
+                       "между которыми не хватает файла.",
                  "en": "Click ☑ to include/exclude a take (or select rows and press Space). "
-                       "A long recording consists of several 2 GB files — they are joined seamlessly. "
-                       "Numbers like 6.1 / 6.2 are parts of one recording with a missing file in between."},
+                       "The ▸ arrow on the left expands the take’s files (12.1, 12.2…) — each has its own tick: "
+                       "drop an unwanted piece; unticking a file in the middle saves the take as two segments. "
+                       "◪ — only some files of the take are selected. Labels like 6a / 6b are parts of one "
+                       "recording with a missing file in between."},
+    "note.partial": {"ru": "выбрано файлов: {n} из {total}", "en": "{n} of {total} files selected"},
+    "note.excluded": {"ru": "не войдёт", "en": "excluded"},
     "sel.all": {"ru": "Выбрать все", "en": "Select all"},
     "sel.none": {"ru": "Снять все", "en": "Select none"},
     "sel.long": {"ru": "Только длиннее 1 мин", "en": "Only longer than 1 min"},
@@ -219,6 +225,18 @@ STRINGS: dict[str, dict[str, str]] = {
 
     # ------------------------------------------------------------------ шаг 4
     "start": {"ru": "▶  Склеить", "en": "▶  Join"},
+    "sound": {"ru": "🔔 Звук по окончании", "en": "🔔 Sound when finished"},
+    "sound.tip": {"ru": "По окончании работы прозвучит сигнал, кнопка программы на панели задач замигает и "
+                        "откроется окно с итогами.",
+                  "en": "When processing ends, a sound plays, the taskbar button flashes and a summary "
+                        "window opens."},
+    "done.title.ok": {"ru": "Готово!", "en": "Done!"},
+    "done.title.fail": {"ru": "Завершено с ошибками", "en": "Finished with errors"},
+    "done.summary": {"ru": "Создано файлов: {n} · {size} · время: {time}",
+                     "en": "Files created: {n} · {size} · time: {time}"},
+    "done.failed": {"ru": "Не удалось: {n} — подробности в журнале.", "en": "Failed: {n} — see the log for details."},
+    "done.open": {"ru": "📂 Открыть папку", "en": "📂 Open folder"},
+    "done.close": {"ru": "Закрыть", "en": "Close"},
     "start.tip": {"ru": "Запустить обработку выбранных дублей.", "en": "Process the selected takes."},
     "stop": {"ru": "■  Стоп", "en": "■  Stop"},
     "open": {"ru": "Открыть папку", "en": "Open folder"},
@@ -366,7 +384,8 @@ AVCHD-камера (Sony Handycam и др.) пишет одну длинную �
 Шаг ② — что склеить
 • Каждая строка — одна запись (одно нажатие REC). Щёлкните ☑, чтобы включить/выключить.
 • «склейка без разрывов» — запись из нескольких файлов по 2 ГБ.
-• 6.1 / 6.2 — части одной записи, между которыми не хватает файла (он указан в примечании).
+• Стрелка ▸ раскрывает файлы дубля (12.1, 12.2, 12.3…) — у каждого своя галочка: можно убрать лишний кусок. ◪ — выбрана часть файлов.
+• 6a / 6b — части одной записи, между которыми не хватает файла (он указан в примечании).
 
 Шаг ③ — каким должен быть результат
 • «Для монтажа» — для любого видеоредактора (видео 1:1, звук PCM без потерь).
@@ -377,7 +396,7 @@ AVCHD-камера (Sony Handycam и др.) пишет одну длинную �
 • «Файл на каждый дубль» или «все в один файл» — как удобнее монтировать.
 • «Прокси» — лёгкие копии для плавного монтажа (Premiere Pro: Proxy → Attach Proxies; DaVinci Resolve: правый щелчок по клипу → Link Proxy Media).
 
-Шаг ④ — «Склеить». Результат — в подпапке joined рядом с исходниками (или где укажете).
+Шаг ④ — «Склеить». Результат — в подпапке joined рядом с исходниками (или где укажете). По окончании прозвучит сигнал и откроется окно с итогами.
 
 Наведите мышь на любой элемент — появится подсказка.
 
@@ -404,7 +423,8 @@ Step ① — where are the videos
 Step ② — what to join
 • Each row is one recording (one REC press). Click ☑ to include/exclude.
 • “seamless join” — a recording made of several 2 GB files.
-• 6.1 / 6.2 — parts of one recording with a missing file in between (named in the note).
+• The ▸ arrow expands a take’s files (12.1, 12.2, 12.3…) — each has its own tick, so you can drop an unwanted piece. ◪ — some files selected.
+• 6a / 6b — parts of one recording with a missing file in between (named in the note).
 
 Step ③ — what the result should be
 • “For editing” — for any video editor (video 1:1, lossless PCM audio).
@@ -415,7 +435,7 @@ Step ③ — what the result should be
 • “One file per take” or “all in one file” — whatever is easier to edit.
 • “Proxies” — light copies for smooth editing (Premiere Pro: Proxy → Attach Proxies; DaVinci Resolve: right-click a clip → Link Proxy Media).
 
-Step ④ — “Join”. The result goes to a “joined” subfolder next to the sources (or wherever you choose).
+Step ④ — “Join”. The result goes to a “joined” subfolder next to the sources (or wherever you choose). When it finishes, a sound plays and a summary window opens.
 
 Hover over any control to see a tip.
 
