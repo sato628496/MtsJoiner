@@ -29,7 +29,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import avchd
+from . import avchd, tsprobe
+from .i18n import T, get_lang
 
 VIDEO_EXTS = {".mts", ".m2ts"}
 CONTINUITY_TOLERANCE = 0.2   # с
@@ -42,6 +43,9 @@ KNOWN_FFMPEG_DIRS = [
     r"C:\Program Files\ffmpeg\bin",
     r"D:\Bitwig Studio\bin",
     r"C:\Program Files\Bitwig Studio\bin",
+    r"C:\Program Files\EibolSoft\FFmpeg Batch AV Converter",
+    r"C:\Program Files\Shutter Encoder\Library",
+    r"C:\Program Files (x86)\FFmpeg\bin",
 ]
 
 
@@ -54,11 +58,14 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _pair_in(folder: Path) -> tuple[str, str] | None:
-    ff, fp = folder / "ffmpeg.exe", folder / "ffprobe.exe"
-    if ff.is_file() and fp.is_file():
-        return str(ff), str(fp)
-    return None
+def _ffmpeg_in(folder: Path) -> str | None:
+    ff = folder / "ffmpeg.exe"
+    return str(ff) if ff.is_file() else None
+
+
+def _ffprobe_in(folder: Path) -> str | None:
+    fp = folder / "ffprobe.exe"
+    return str(fp) if fp.is_file() else None
 
 
 def ffmpeg_candidates() -> list[Path]:
@@ -77,18 +84,23 @@ def ffmpeg_candidates() -> list[Path]:
     return dirs
 
 
-def find_ffmpeg(manual: str | None = None) -> tuple[str, str] | None:
-    """Вернуть (ffmpeg, ffprobe). manual — путь, выбранный пользователем."""
+def find_ffmpeg(manual: str | None = None) -> tuple[str, str | None] | None:
+    """Вернуть (ffmpeg, ffprobe или None). manual — путь, выбранный пользователем.
+
+    ffprobe не обязателен: без него файлы разбирает встроенный анализатор (tsprobe). Если рядом
+    с выбранным ffmpeg нет ffprobe, берётся ffprobe из другой найденной сборки.
+    """
+    cands = ffmpeg_candidates()
+    ff = None
     if manual:
-        p = Path(manual)
-        pair = _pair_in(p.parent if p.suffix else p)
-        if pair:
-            return pair
-    for d in ffmpeg_candidates():
-        pair = _pair_in(d)
-        if pair:
-            return pair
-    return None
+        m = Path(manual)
+        ff = _ffmpeg_in(m.parent if m.suffix else m)
+    if not ff:
+        ff = next((x for x in map(_ffmpeg_in, cands) if x), None)
+    if not ff:
+        return None
+    fp = _ffprobe_in(Path(ff).parent) or next((x for x in map(_ffprobe_in, cands) if x), None)
+    return ff, fp
 
 
 def _run(cmd: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
@@ -118,14 +130,10 @@ ENCODER_PREFS = {
     "h264": ["h264_nvenc", "h264_amf", "h264_qsv", "libx264", "h264_mf"],
     "hevc": ["hevc_nvenc", "hevc_amf", "hevc_qsv", "libx265", "hevc_mf"],
 }
-ENCODER_NAMES = {
-    "libx264": "x264 (процессор, лучшее качество)",
-    "libx265": "x265 (процессор, медленно)",
-    "h264_nvenc": "NVIDIA NVENC", "hevc_nvenc": "NVIDIA NVENC",
-    "h264_amf": "AMD AMF", "hevc_amf": "AMD AMF",
-    "h264_qsv": "Intel QuickSync", "hevc_qsv": "Intel QuickSync",
-    "h264_mf": "Windows Media Foundation", "hevc_mf": "Windows Media Foundation",
-}
+def encoder_name(enc: str) -> str:
+    if enc.startswith("lib"):
+        return T(f"enc.{enc}")
+    return T(f"enc.{enc.split('_')[-1]}")
 
 
 def working_encoders(ffmpeg: str) -> dict[str, list[str]]:
@@ -268,7 +276,28 @@ def list_files(folder: Path) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS)
 
 
-def probe_clip(ffprobe: str, clip: Clip) -> Clip:
+def probe_clip_builtin(ffmpeg: str, clip: Clip) -> Clip:
+    """Без ffprobe: метки времени — встроенным анализатором, формат — из `ffmpeg -i`."""
+    try:
+        tm = tsprobe.ts_timing(clip.path)
+        info = tsprobe.ffmpeg_info(ffmpeg, clip.path, CREATE_NO_WINDOW)
+    except Exception as e:  # noqa: BLE001
+        clip.error = str(e)
+        return clip
+    if "v_start" not in tm:
+        clip.error = T("core.novideo")
+        return clip
+    clip.v_start, clip.v_dur = tm["v_start"], tm["v_dur"]
+    clip.a_start, clip.a_dur = tm.get("a_start"), tm.get("a_dur")
+    clip.width, clip.height, clip.fps = info.get("width"), info.get("height"), info.get("fps")
+    clip.interlaced = bool(info.get("interlaced"))
+    clip.a_codec, clip.a_channels = info.get("a_codec"), info.get("a_channels")
+    return clip
+
+
+def probe_clip(ffprobe: str | None, clip: Clip, ffmpeg: str | None = None) -> Clip:
+    if not ffprobe:
+        return probe_clip_builtin(ffmpeg, clip)
     cmd = [ffprobe, "-v", "error", "-show_entries",
            "stream=codec_type,codec_name,start_time,duration,width,height,r_frame_rate,channels,field_order",
            "-of", "json", str(clip.path)]
@@ -282,13 +311,13 @@ def probe_clip(ffprobe: str, clip: Clip) -> Clip:
     v = next((s for s in streams if s.get("codec_type") == "video"), None)
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if not v:
-        clip.error = "нет видеодорожки"
+        clip.error = T("core.novideo")
         return clip
     try:
         clip.v_start = float(v.get("start_time"))
         clip.v_dur = float(v.get("duration"))
     except (TypeError, ValueError):
-        clip.error = "не удалось прочитать длительность"
+        clip.error = T("core.nodur")
     clip.width, clip.height, clip.fps = v.get("width"), v.get("height"), v.get("r_frame_rate")
     clip.interlaced = v.get("field_order") in ("tt", "bb", "tb", "bt")
     if a:
@@ -302,9 +331,9 @@ def probe_clip(ffprobe: str, clip: Clip) -> Clip:
 
 def _fmt_missing(names: list[str], seconds: float) -> str:
     if not names:
-        return f"не хватает ≈{fmt_dur(seconds)}"
+        return T("core.missing_noname", dur=fmt_dur(seconds))
     shown = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
-    return f"нет файла {shown} (≈{fmt_dur(seconds)})"
+    return T("core.missing", names=shown, dur=fmt_dur(seconds))
 
 
 def _finish_parts(rec_no: int, parts: list[tuple[list[Clip], str, datetime | None]],
@@ -347,7 +376,7 @@ def group_by_timestamps(clips: list[Clip], takes: list[Take], rec_no: int) -> in
             flush()
             note = ""
             if ok and c.v_start > NEW_RECORDING_START:
-                note = f"нет начала записи (≈{fmt_dur(c.v_start - 1.02)})"
+                note = T("core.no_start", dur=fmt_dur(c.v_start - 1.02))
             parts = [([c], note, None)]
         prev = c
     flush()
@@ -387,14 +416,13 @@ def group_by_metadata(clips: list[Clip], bdmv: Path, takes: list[Take],
             c.meta_name = cands[0]
             assigned[c.meta_name] = c
         elif any(n in assigned for n in by_size.get(c.size, [])):
-            skipped.append(f"Пропущен дубликат: {c.path.name} (тот же клип, что "
-                           f"{assigned[by_size[c.size][0]].path.name})")
+            skipped.append(T("core.dup", name=c.path.name,
+                             other=assigned[by_size[c.size][0]].path.name))
         elif c.path.stem in cpis and c.path.stem not in assigned:
             # имя есть в метаданных, но размер другой — файл обрезан/повреждён при копировании?
             c.meta_name = c.path.stem
             assigned[c.meta_name] = c
-            skipped.append(f"⚠ {c.path.name}: размер {c.size} Б, а по метаданным "
-                           f"{cpis[c.path.stem].size} Б — файл мог быть скопирован не полностью.")
+            skipped.append(T("core.badsize", name=c.path.name, size=c.size, meta=cpis[c.path.stem].size))
         else:
             unmatched.append(c)
 
@@ -422,20 +450,21 @@ def group_by_metadata(clips: list[Clip], bdmv: Path, takes: list[Take],
                 if missing:
                     note = _fmt_missing(missing, missing_sec)
                     if not parts:
-                        note = "начало записи: " + note
+                        note = T("core.start_of", what=note)
                 dt = r.start_dt + timedelta(seconds=it.t_in - t0) if r.start_dt else None
                 parts.append(([c], note, dt))
                 missing, missing_sec = [], 0.0
         if missing and parts:  # нет хвоста записи
             last = parts[-1]
             tail = _fmt_missing(missing, missing_sec)
-            parts[-1] = (last[0], (last[1] + "; " if last[1] else "") + "конец записи: " + tail, last[2])
+            parts[-1] = (last[0], (last[1] + "; " if last[1] else "") + T("core.end_of", what=tail), last[2])
         _finish_parts(rec_no, parts, takes, True)
     return unmatched, warnings
 
 
-def scan_folder(folder: Path, ffprobe: str, meta: Path | None = None,
-                progress: Callable[[int, int], None] | None = None) -> ScanResult:
+def scan_folder(folder: Path, ffprobe: str | None, meta: Path | None = None,
+                progress: Callable[[int, int], None] | None = None,
+                ffmpeg: str | None = None) -> ScanResult:
     paths = list_files(folder)
     skipped: list[str] = []
     clips: list[Clip] = []
@@ -446,7 +475,7 @@ def scan_folder(folder: Path, ffprobe: str, meta: Path | None = None,
 
     done = 0
     with ThreadPoolExecutor(max_workers=4) as ex:
-        for _ in ex.map(lambda c: probe_clip(ffprobe, c), clips):
+        for _ in ex.map(lambda c: probe_clip(ffprobe, c, ffmpeg), clips):
             done += 1
             if progress:
                 progress(done, len(clips))
@@ -455,15 +484,15 @@ def scan_folder(folder: Path, ffprobe: str, meta: Path | None = None,
     bdmv = avchd.find_bdmv(meta) if meta else None
     warnings: list[str] = []
     if meta and not bdmv:
-        warnings.append(f"В «{meta}» не найдены папки PLAYLIST и CLIPINF — дубли определены по меткам времени.")
+        warnings.append(T("core.nometa", path=meta))
     if bdmv:
         rest, warnings = group_by_metadata(clips, bdmv, takes, skipped)
         if rest:
-            warnings.append(f"Файлов нет в метаданных камеры: {len(rest)} — сгруппированы по меткам времени.")
+            warnings.append(T("core.notinmeta", n=len(rest)))
             numbered = [c for c in rest if c.number is not None]
             for c in rest:
                 if c.number is None:
-                    skipped.append(f"Пропущен (не номерное имя и нет в метаданных): {c.path.name}")
+                    skipped.append(T("core.nonum_meta", name=c.path.name))
             last_rec = max((t.rec_no for t in takes), default=0)
             group_by_timestamps(numbered, takes, last_rec)
     else:
@@ -471,8 +500,8 @@ def scan_folder(folder: Path, ffprobe: str, meta: Path | None = None,
         for c in clips:
             if c.number is None:
                 dup = next((o for o in clips if o is not c and o.number is not None and o.size == c.size), None)
-                skipped.append(f"Пропущен дубликат: {c.path.name} (= {dup.path.name})" if dup
-                               else f"Пропущен (не номерное имя): {c.path.name}")
+                skipped.append(T("core.dup2", name=c.path.name, other=dup.path.name) if dup
+                               else T("core.nonum", name=c.path.name))
             else:
                 numbered.append(c)
         group_by_timestamps(numbered, takes, 0)
@@ -505,33 +534,26 @@ class Options:
 @dataclass
 class Preset:
     key: str
-    title: str
-    hint: str
     opts: dict
+
+    @property
+    def title(self) -> str:
+        return T(f"p.{self.key}")
+
+    @property
+    def hint(self) -> str:
+        return T(f"p.{self.key}.hint")
 
 
 PRESETS = [
-    Preset("premiere", "Монтаж в Premiere — без потерь",
-           "Видео 1:1 без перекодирования, звук PCM 5.1 24 бит (Premiere читает всегда). "
-           "Идеально и для заливки на YouTube, если не жалко объёма.",
-           dict(container="mov", video="copy", audio="pcm", stereo=False, faststart=False)),
-    Preset("archive", "Архив — бит-в-бит как с камеры",
-           "Видео и звук AC3 копируются без изменений, просто склеены. Минимальный объём без потерь.",
-           dict(container="mp4", video="copy", audio="copy", stereo=False, faststart=False)),
-    Preset("youtube", "YouTube — без потерь",
-           "Видео 1:1 (≈25 Мбит/с — выше рекомендации YouTube для 1080p50), звук AAC 512 кбит/с 5.1 — "
-           "максимум из рекомендаций YouTube. YouTube всё равно перекодирует, так что лучше не сделать.",
-           dict(container="mp4", video="copy", audio="aac", audio_kbps=512, stereo=False, faststart=True)),
-    Preset("telegram", "Telegram — под лимит файла",
-           "H.264 + AAC стерео, «быстрый старт» для просмотра в чате. Битрейт подбирается так, чтобы "
-           "файл влез в лимит (2 ГБ, с Premium — 4 ГБ); длинная запись режется на части.",
-           dict(container="mp4", video="h264", rate_mode="size", size_limit_mb=1950, height=-1,
-                audio="aac", audio_kbps=192, stereo=True, faststart=True)),
-    Preset("economy", "Экономичный — в 3–5 раз меньше",
-           "HEVC (H.265) 1080p50 с постоянным качеством, звук AAC 5.1 384 кбит/с. Визуально почти "
-           "без потерь — для хранения и просмотра, когда оригинал слишком тяжёлый.",
-           dict(container="mp4", video="hevc", rate_mode="quality", quality=23, height=0,
-                audio="aac", audio_kbps=384, stereo=False, faststart=True)),
+    Preset("premiere", dict(container="mov", video="copy", audio="pcm", stereo=False, faststart=False)),
+    Preset("archive", dict(container="mp4", video="copy", audio="copy", stereo=False, faststart=False)),
+    Preset("youtube", dict(container="mp4", video="copy", audio="aac", audio_kbps=512, stereo=False,
+                           faststart=True)),
+    Preset("telegram", dict(container="mp4", video="h264", rate_mode="size", size_limit_mb=1950, height=-1,
+                            audio="aac", audio_kbps=192, stereo=True, faststart=True)),
+    Preset("economy", dict(container="mp4", video="hevc", rate_mode="quality", quality=23, height=0,
+                           audio="aac", audio_kbps=384, stereo=False, faststart=True)),
 ]
 CUSTOM_PRESET = "custom"
 
@@ -726,13 +748,13 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
     if opts.video != "copy":
         enc = pick_encoder(opts, available or {})
         if not enc:
-            raise RuntimeError(f"В ffmpeg нет рабочего кодировщика {opts.video.upper()}.")
+            raise RuntimeError(T("core.noenc", codec=opts.video.upper()))
 
     # источники: (название, аргументы входа, начальный сдвиг, длительность, имя файла, обрезка)
     sources: list[tuple[str, list[str], float, float, str, bool]] = []
     if opts.single_file and len(takes) > 1:
-        name = (f"{prefix}_концерт" if len(takes) == total_rows
-                else f"{prefix}_дубли_{takes[0].label}-{takes[-1].label}")
+        name = (f"{prefix}_{T('file.concert')}" if len(takes) == total_rows
+                else f"{prefix}_{T('file.takes')}_{takes[0].label}-{takes[-1].label}")
         lines = ["ffconcat version 1.0"]
         total = 0.0
         for t in takes:
@@ -750,17 +772,17 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines) + "\n")
         inp = ["-f", "concat", "-safe", "0", "-protocol_whitelist", "file,concat", "-i", list_path]
-        sources.append(("Все дубли", inp, 0.0, total, name, False))
+        sources.append((T("core.all_takes"), inp, 0.0, total, name, False))
         temp = [Path(list_path)]
     else:
         temp = []
         for t in takes:
             span = t.first_name + (f"-{t.last_name}" if len(t.clips) > 1 else "")
-            part = f"_ч{t.part}" if t.parts_total > 1 else ""
+            part = f"_{T('file.part')}{t.part}" if t.parts_total > 1 else ""
             head, dur = t.trim()
-            sources.append((f"Дубль {t.label}", ["-i", concat_url(t)], head,
+            sources.append((T("core.take", label=t.label), ["-i", concat_url(t)], head,
                             dur if dur is not None else t.duration,
-                            f"{prefix}_дубль{t.rec_no:02d}{part}_{span}", dur is not None))
+                            f"{prefix}_{T('file.take')}{t.rec_no:02d}{part}_{span}", dur is not None))
 
     interlaced = any(c.interlaced for t in takes for c in t.clips)
     jobs: list[Job] = []
@@ -779,7 +801,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
             tail += ["-movflags", "+faststart"]
         seg = dur / plan.parts
         for k in range(plan.parts):
-            suffix = f"_часть{k + 1}из{plan.parts}" if plan.parts > 1 else ""
+            suffix = "_" + T("file.piece", k=k + 1, n=plan.parts) if plan.parts > 1 else ""
             out = unique_path(opts.out_dir / f"{stem}{suffix}.{ext}", reserved)
             cut = []
             if plan.parts > 1:
@@ -791,7 +813,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
             jt = f"{title} → {out.name}"
             if plan.height or plan.video_kbps:
                 jt += f"  [{(str(plan.height) + 'p ') if plan.height else ''}" \
-                      f"{(str(plan.video_kbps) + ' кбит/с') if plan.video_kbps else ''}]"
+                      f"{(str(plan.video_kbps) + ' ' + T('core.kbps')) if plan.video_kbps else ''}]"
             jobs.append(Job("join", jt, cmd, out, seg, temp if k == plan.parts - 1 else []))
 
     if opts.proxies:
@@ -803,7 +825,7 @@ def build_jobs(ffmpeg: str, takes: list[Take], opts: Options, prefix: str,
                    "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
                    # Premiere требует у прокси то же число аудиоканалов — копируем звук как есть
                    "-c:a", "copy", str(out)]
-            jobs.append(Job("proxy", f"Прокси → {out.name}", cmd, out, j.duration))
+            jobs.append(Job("proxy", f"{T('core.proxy')} → {out.name}", cmd, out, j.duration))
     return jobs
 
 
@@ -850,10 +872,10 @@ class Runner:
                     except OSError:
                         pass
                     if self.cancelled:
-                        self.on_log("■ Остановлено пользователем, недописанный файл удалён.")
+                        self.on_log(T("run.stopped"))
                         return False
                     continue
-                self.on_log(f"✔ Готово: {job.output}")
+                self.on_log(T("run.done", path=job.output))
             return ok_all
         finally:
             for job in jobs:
@@ -865,7 +887,7 @@ class Runner:
 
     def _run_one(self, i: int, n: int, job: Job) -> bool:
         if job.kind == "proxy" and not Path(job.cmd[job.cmd.index("-i") + 1]).exists():
-            self.on_log("  пропуск: нет исходного файла для прокси")
+            self.on_log(T("run.noproxy"))
             return False
         self._proc = subprocess.Popen(job.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
@@ -891,7 +913,7 @@ class Runner:
         th.join(timeout=5)
         self._proc = None
         if rc != 0 and not self.cancelled:
-            self.on_log(f"✖ ffmpeg завершился с кодом {rc}:")
+            self.on_log(T("run.fail", rc=rc))
             for l in err_lines[-15:]:
                 self.on_log("   " + l)
             return False
@@ -911,8 +933,9 @@ def fmt_dur(sec: float) -> str:
 
 
 def fmt_size(b: float) -> str:
-    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if b < 1024 or unit == "ТБ":
-            return f"{b:.1f} {unit}" if unit in ("ГБ", "ТБ") else f"{b:.0f} {unit}"
+    units = ("Б", "КБ", "МБ", "ГБ", "ТБ") if get_lang() == "ru" else ("B", "KB", "MB", "GB", "TB")
+    for i, unit in enumerate(units):
+        if b < 1024 or i == len(units) - 1:
+            return f"{b:.1f} {unit}" if i >= 3 else f"{b:.0f} {unit}"
         b /= 1024
-    return f"{b:.1f} ТБ"
+    return f"{b:.1f} {units[-1]}"
